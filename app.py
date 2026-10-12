@@ -48,7 +48,7 @@ prev_work_options = [str(i) for i in range(0, 6)]  # 前月連勤の選択肢（
 PREV_COL = "前月連勤"
 WEEKDAYS_JP = ["月", "火", "水", "木", "金", "土", "日"]
 
-# ★初期表示のスタッフ名リスト（画面上でいつでも個人名に書き換え・Excel保存が可能です）
+# ★初期表示のスタッフ名リスト
 DEFAULT_STAFF_NAMES = [chr(ord('A') + i) for i in range(16)]
 
 def get_default_staff_df():
@@ -64,6 +64,9 @@ def get_default_staff_df():
         data.append({"スタッフ名": name, "早の上限": haya_lim, "Qの上限": q_lim, "遅の上限": oso_lim, "入の上限": iri_lim})
     return pd.DataFrame(data)
 
+def get_default_ng_pairs_df():
+    return pd.DataFrame({"スタッフ1": pd.Series(dtype="str"), "スタッフ2": pd.Series(dtype="str")})
+
 def extract_day_num(col_name):
     s = str(col_name).strip()
     if "(" in s:
@@ -72,6 +75,8 @@ def extract_day_num(col_name):
 
 if "staff_df" not in st.session_state:
     st.session_state.staff_df = get_default_staff_df()
+if "ng_pairs_df" not in st.session_state:
+    st.session_state.ng_pairs_df = get_default_ng_pairs_df()
 if "req_df" not in st.session_state:
     init_cols = [PREV_COL] + [str(i) for i in range(1, 32)]
     init_req = pd.DataFrame("", index=st.session_state.staff_df["スタッフ名"].tolist(), columns=init_cols)
@@ -125,6 +130,10 @@ if uploaded_file is not None:
             if "スタッフ設定" in xls.sheet_names:
                 loaded_staff = pd.read_excel(xls, "スタッフ設定").fillna("制限なし").astype(str)
                 st.session_state.staff_df = loaded_staff
+            if "NGペア設定" in xls.sheet_names:
+                loaded_ng = pd.read_excel(xls, "NGペア設定").fillna("").astype(str)
+                if "スタッフ1" in loaded_ng.columns and "スタッフ2" in loaded_ng.columns:
+                    st.session_state.ng_pairs_df = loaded_ng[["スタッフ1", "スタッフ2"]]
             if "希望休入力" in xls.sheet_names:
                 loaded_req = pd.read_excel(xls, "希望休入力", index_col=0).fillna("").astype(str)
                 norm_cols = [PREV_COL] + [str(i) for i in range(1, 32)]
@@ -146,13 +155,12 @@ if uploaded_file is not None:
             st.sidebar.error(f"読み込みエラー: ファイル形式を確認してください ({e})")
 
 # =====================================================================
-# 1. スタッフ名・個人条件の設定（個人名への書き換え対応）
+# 1. スタッフ名・個人条件・NGペアの設定
 # =====================================================================
 st.subheader("1. スタッフ名・個人条件の設定")
 with st.expander("👥 スタッフ名（個人名への書き換え）・シフト上限・禁止条件を編集する", expanded=True):
     st.caption("・左端の **「スタッフ名」** のマスをダブルクリックすると、アルファベットから個人名（例：佐藤、鈴木など）に自由に書き換えられます。\n・「0」にするとそのシフトは【禁止】になります（例：早の上限＝0 → 早番禁止）。")
     
-    # Excel等から一括で名前を貼り付けられる便利機能
     with st.popover("📝 スタッフ名をまとめて一括変更する（コピペ入力）"):
         st.caption("Excelやメモ帳からスタッフ名を改行区切り（またはスペース・読点区切り）で貼り付けて「反映」を押すと、上から順番に個人名へ一括変更されます。")
         bulk_names_text = st.text_area("スタッフ名リストを入力（例：佐藤、鈴木、高橋...）", height=150)
@@ -168,7 +176,6 @@ with st.expander("👥 スタッフ名（個人名への書き換え）・シフ
                         new_row = pd.DataFrame([{"スタッフ名": new_name, "早の上限": "制限なし", "Qの上限": "制限なし", "遅の上限": "制限なし", "入の上限": "制限なし"}])
                         new_staff_df = pd.concat([new_staff_df, new_row], ignore_index=True)
                 st.session_state.staff_df = new_staff_df
-                # 希望休テーブルの行名も新しい名前に連動して引き継ぐ
                 updated_names = new_staff_df["スタッフ名"].tolist()
                 new_req_df = pd.DataFrame("", index=updated_names, columns=old_req_df.columns)
                 new_req_df[PREV_COL] = "0"
@@ -203,6 +210,22 @@ for i, name in enumerate(raw_names):
     else:
         staff_names.append(name)
 staffs = len(staff_names)
+
+# 夜勤（入）の同日NGペア設定
+with st.expander("🚫 夜勤（入）の同日NGペア設定（特定の人と人を同時に「入」にしない）", expanded=False):
+    st.caption("・下の表の「＋」を押して行を追加し、同じ日に「入（夜勤入り）」にしたくない2人を選択してください（何組でも登録可能です）。\n・削除したい場合は、行の左端にチェックを入れて右上のゴミ箱マークを押してください。")
+    ng_col_config = {
+        "スタッフ1": st.column_config.SelectboxColumn("スタッフ1", options=staff_names, required=True, width="medium"),
+        "スタッフ2": st.column_config.SelectboxColumn("スタッフ2", options=staff_names, required=True, width="medium"),
+    }
+    edited_ng_pairs_df = st.data_editor(
+        st.session_state.ng_pairs_df,
+        column_config=ng_col_config,
+        num_rows="dynamic",
+        use_container_width=True,
+        key=f"ng_editor_{st.session_state.editor_key}"
+    )
+st.session_state.ng_pairs_df = edited_ng_pairs_df
 
 # =====================================================================
 # 2. メイン画面：希望休・指定シフトの入力表（前月連勤＋曜日付き）
@@ -264,13 +287,14 @@ save_req_df.columns = [PREV_COL] + [day_labels[int(c)] for c in day_cols]
 save_output = io.BytesIO()
 with pd.ExcelWriter(save_output, engine='openpyxl') as writer:
     edited_staff_df.to_excel(writer, sheet_name='スタッフ設定', index=False)
+    edited_ng_pairs_df.to_excel(writer, sheet_name='NGペア設定', index=False)
     save_req_df.to_excel(writer, sheet_name='希望休入力')
 save_excel_bytes = save_output.getvalue()
 
 col_save1, col_save2 = st.columns([1, 1])
 with col_save1:
     st.download_button(
-        label="💾 現在の入力進捗（個人名・設定・前月連勤・希望休）をExcelに一時保存",
+        label="💾 現在の入力進捗（個人名・設定・NGペア・希望休）をExcelに一時保存",
         data=save_excel_bytes,
         file_name=f"shift_progress_{target_year}_{target_month:02d}.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -291,7 +315,7 @@ if st.sidebar.button("🔓 ログアウト"):
     st.rerun()
 
 # =====================================================================
-# 画面の表から 前月連勤・指定シフト・希望休の場所 を読み取る
+# 画面の表から 前月連勤・指定シフト・希望休・NGペア を読み取る
 # =====================================================================
 SPECIFIC_SHIFTS = {}
 KIBOU_YASU_CELLS = set()
@@ -323,6 +347,21 @@ def get_personal_limits():
                 desc = f"{s_name}さんの「{s_label}」は禁止(0回)" if max_c == 0 else f"{s_name}さんの「{s_label}」は{max_c}回まで"
                 limits.append((s_idx, s_type, max_c, desc))
     return limits
+
+def get_ng_pairs():
+    pairs = []
+    seen = set()
+    for _, row in edited_ng_pairs_df.iterrows():
+        n1 = str(row.get("スタッフ1", "")).strip()
+        n2 = str(row.get("スタッフ2", "")).strip()
+        if n1 in staff_names and n2 in staff_names and n1 != n2:
+            idx1 = staff_names.index(n1)
+            idx2 = staff_names.index(n2)
+            pair_key = tuple(sorted((idx1, idx2)))
+            if pair_key not in seen:
+                seen.add(pair_key)
+                pairs.append((idx1, idx2, f"{n1}さんと{n2}さんの同日「入」禁止"))
+    return pairs
 
 # =====================================================================
 # 完成したシフト表の整形（希望休の復元・右端への回数集計列の追加・色分け）
@@ -399,6 +438,7 @@ def check_shortage():
 def run_normal_mode():
     q_days_idx = [d - 1 for d in Q_SHIFT_DAYS]
     personal_limits = get_personal_limits()
+    ng_pairs = get_ng_pairs()
     
     def attempt_fast_solve(consecutive_limit, strict_rank):
         model = cp_model.CpModel()
@@ -451,6 +491,11 @@ def run_normal_mode():
             else:
                 model.Add(sum(B[s_idx, d, s_type] for d in range(TARGET_DAYS)) <= max_c)
 
+        # ★夜勤（入）の同日NGペア制約（同じ日に2人とも「入」になるのを禁止）
+        for s1, s2, _ in ng_pairs:
+            for d in range(TARGET_DAYS):
+                model.Add(B[s1, d, S_IRI] + B[s2, d, S_IRI] <= 1)
+
         iri_counts = [model.NewIntVar(0, TARGET_DAYS, f'iri_{s}') for s in range(staffs)]
         for s in range(staffs):
             model.Add(iri_counts[s] == sum(B[s, d, S_IRI] for d in range(TARGET_DAYS)))
@@ -487,6 +532,7 @@ def run_debug_mode():
     model = cp_model.CpModel()
     q_days_idx = [d - 1 for d in Q_SHIFT_DAYS]
     personal_limits = get_personal_limits()
+    ng_pairs = get_ng_pairs()
     B = {(s, d, t): model.NewBoolVar(f'B_{s}_{d}_{t}') for s in range(staffs) for d in range(TARGET_DAYS) for t in range(9)}
     penalties = []
     violations_info = []
@@ -546,6 +592,11 @@ def run_debug_mode():
         else:
             add_soft(model.Add(sum(B[s_idx, d, s_type] for d in range(TARGET_DAYS)) <= max_c), 20, f"【個人条件違反】{desc}")
 
+    # ★夜勤（入）の同日NGペア制約（デバッグ用）
+    for s1, s2, desc in ng_pairs:
+        for d in range(TARGET_DAYS):
+            add_soft(model.Add(B[s1, d, S_IRI] + B[s2, d, S_IRI] <= 1), 25, f"【NGペア違反】{day_labels[d+1]}: {desc}")
+
     model.Minimize(sum(penalties))
     solver = cp_model.CpSolver()
     solver.parameters.num_search_workers = 8
@@ -587,6 +638,7 @@ if st.button("🚀 シフト表を作成する", type="primary", use_container_w
             with pd.ExcelWriter(output, engine='openpyxl') as writer:
                 styled_result.to_excel(writer, sheet_name='完成シフト表')
                 edited_staff_df.to_excel(writer, sheet_name='スタッフ設定', index=False)
+                edited_ng_pairs_df.to_excel(writer, sheet_name='NGペア設定', index=False)
                 save_req_df.to_excel(writer, sheet_name='希望休入力')
             excel_data = output.getvalue()
             
