@@ -50,6 +50,7 @@ WEEKDAYS_JP = ["月", "火", "水", "木", "金", "土", "日"]
 
 # ★初期表示のスタッフ名リスト
 DEFAULT_STAFF_NAMES = [chr(ord('A') + i) for i in range(16)]
+DEFAULT_Q_DAYS = [1, 3, 6, 7, 8, 13, 14, 15, 17, 20, 22, 24, 27, 28, 29]
 
 def get_default_staff_df():
     data = []
@@ -73,6 +74,20 @@ def extract_day_num(col_name):
         s = s.split("(")[0].strip()
     return int(s) if s.isdigit() else None
 
+# セッション状態の初期化（毎月の基本設定もセッションで保持）
+now = datetime.datetime.now()
+if "setting_year" not in st.session_state:
+    st.session_state.setting_year = now.year
+if "setting_month" not in st.session_state:
+    st.session_state.setting_month = now.month
+if "setting_days" not in st.session_state:
+    _, auto_d = calendar.monthrange(st.session_state.setting_year, st.session_state.setting_month)
+    st.session_state.setting_days = auto_d
+if "setting_yasu" not in st.session_state:
+    st.session_state.setting_yasu = 9
+if "setting_q_days" not in st.session_state:
+    st.session_state.setting_q_days = [d for d in DEFAULT_Q_DAYS if d <= st.session_state.setting_days]
+
 if "staff_df" not in st.session_state:
     st.session_state.staff_df = get_default_staff_df()
 if "ng_pairs_df" not in st.session_state:
@@ -90,28 +105,63 @@ if "editor_key" not in st.session_state:
 # =====================================================================
 st.sidebar.header("⚙️ 毎月の基本設定")
 
-now = datetime.datetime.now()
+# 対象年・月が変わったら月の日数を自動更新するコールバック
+def on_ym_change():
+    y = int(st.session_state.ym_year_input)
+    m = int(st.session_state.ym_month_input)
+    st.session_state.setting_year = y
+    st.session_state.setting_month = m
+    _, max_d = calendar.monthrange(y, m)
+    st.session_state.setting_days = max_d
+    st.session_state.setting_q_days = [d for d in st.session_state.setting_q_days if d <= max_d]
+
 col_y, col_m = st.sidebar.columns(2)
-target_year = col_y.number_input("対象年", min_value=2024, max_value=2035, value=now.year)
-target_month = col_m.number_input("対象月", min_value=1, max_value=12, value=now.month)
+target_year = int(col_y.number_input(
+    "対象年", min_value=2024, max_value=2035,
+    value=int(st.session_state.setting_year),
+    key="ym_year_input", on_change=on_ym_change
+))
+target_month = int(col_m.number_input(
+    "対象月", min_value=1, max_value=12,
+    value=int(st.session_state.setting_month),
+    key="ym_month_input", on_change=on_ym_change
+))
+st.session_state.setting_year = target_year
+st.session_state.setting_month = target_month
 
-_, auto_days = calendar.monthrange(int(target_year), int(target_month))
-TARGET_DAYS = st.sidebar.number_input("月の日数（自動計算）", min_value=28, max_value=31, value=auto_days)
+TARGET_DAYS = int(st.sidebar.number_input(
+    "月の日数（自動計算）", min_value=28, max_value=31,
+    value=int(st.session_state.setting_days),
+    key=f"days_input_{st.session_state.editor_key}_{target_year}_{target_month}"
+))
+st.session_state.setting_days = TARGET_DAYS
 
-day_labels = {
-    d: f"{d}({WEEKDAYS_JP[datetime.date(int(target_year), int(target_month), d).weekday()]})"
-    for d in range(1, TARGET_DAYS + 1)
-}
+# 選択された年・月・日数から曜日ラベルを生成（例：2月に31日を指定した場合もエラーにならない安全設計）
+_, cal_max_days = calendar.monthrange(target_year, target_month)
+day_labels = {}
+for d in range(1, TARGET_DAYS + 1):
+    if d <= cal_max_days:
+        wd = WEEKDAYS_JP[datetime.date(target_year, target_month, d).weekday()]
+        day_labels[d] = f"{d}({wd})"
+    else:
+        day_labels[d] = f"{d}"
 
-TARGET_YASU = st.sidebar.number_input("全員が必ずとる「休＋希望休」の日数", min_value=1, max_value=15, value=9)
+TARGET_YASU = int(st.sidebar.number_input(
+    "全員が必ずとる「休＋希望休」の日数", min_value=1, max_value=15,
+    value=int(st.session_state.setting_yasu),
+    key=f"yasu_input_{st.session_state.editor_key}"
+))
+st.session_state.setting_yasu = TARGET_YASU
 
-default_q_days = [d for d in [1, 3, 6, 7, 8, 13, 14, 15, 17, 20, 22, 24, 27, 28, 29] if d <= TARGET_DAYS]
+valid_q_defaults = [d for d in st.session_state.setting_q_days if 1 <= d <= TARGET_DAYS]
 Q_SHIFT_DAYS = st.sidebar.multiselect(
     "「Q」シフトを【配置しない】日",
     options=list(range(1, TARGET_DAYS + 1)),
-    default=default_q_days,
-    format_func=lambda d: day_labels.get(d, str(d))
+    default=valid_q_defaults,
+    format_func=lambda d: day_labels.get(d, str(d)),
+    key=f"q_days_input_{st.session_state.editor_key}_{TARGET_DAYS}"
 )
+st.session_state.setting_q_days = Q_SHIFT_DAYS
 
 mode = st.sidebar.radio(
     "実行モード",
@@ -120,13 +170,39 @@ mode = st.sidebar.radio(
 
 st.sidebar.divider()
 st.sidebar.subheader("📂 保存データの読み込み")
-st.sidebar.caption("一時保存したExcelや、先月の完成シフト表Excelを読み込むと、個人名や条件がそのまま復元されます。")
+st.sidebar.caption("一時保存したExcelや、完成シフト表Excelを読み込むと、基本設定（Qなし日など）・個人名・条件・希望休がすべて復元されます。")
 
 uploaded_file = st.sidebar.file_uploader("Excelファイルを選択", type=["xlsx"])
 if uploaded_file is not None:
     if st.sidebar.button("🔄 データを画面に反映する", type="primary", use_container_width=True):
         try:
             xls = pd.ExcelFile(uploaded_file)
+            # ★基本設定（対象年月・日数・休の日数・Qを配置しない日）の復元
+            if "基本設定" in xls.sheet_names:
+                loaded_settings = pd.read_excel(xls, "基本設定")
+                settings_map = dict(zip(loaded_settings["設定項目"].astype(str), loaded_settings["設定値"]))
+                if "対象年" in settings_map and str(settings_map["対象年"]).replace('.', '', 1).isdigit():
+                    st.session_state.setting_year = int(float(settings_map["対象年"]))
+                    st.session_state.ym_year_input = st.session_state.setting_year
+                if "対象月" in settings_map and str(settings_map["対象月"]).replace('.', '', 1).isdigit():
+                    st.session_state.setting_month = int(float(settings_map["対象月"]))
+                    st.session_state.ym_month_input = st.session_state.setting_month
+                if "月の日数" in settings_map and str(settings_map["月の日数"]).replace('.', '', 1).isdigit():
+                    st.session_state.setting_days = int(float(settings_map["月の日数"]))
+                if "休の日数" in settings_map and str(settings_map["休の日数"]).replace('.', '', 1).isdigit():
+                    st.session_state.setting_yasu = int(float(settings_map["休の日数"]))
+                if "Qを配置しない日" in settings_map:
+                    q_raw = str(settings_map["Qを配置しない日"]).strip()
+                    if q_raw == "" or q_raw.lower() == "nan" or q_raw == "なし":
+                        st.session_state.setting_q_days = []
+                    else:
+                        q_list = []
+                        for x in q_raw.split(","):
+                            x_clean = x.strip().split(".")[0]
+                            if x_clean.isdigit():
+                                q_list.append(int(x_clean))
+                        st.session_state.setting_q_days = q_list
+
             if "スタッフ設定" in xls.sheet_names:
                 loaded_staff = pd.read_excel(xls, "スタッフ設定").fillna("制限なし").astype(str)
                 st.session_state.staff_df = loaded_staff
@@ -149,7 +225,7 @@ if uploaded_file is not None:
                             normalized_req[str(d_num)] = loaded_req[col].values
                 st.session_state.req_df = normalized_req
             st.session_state.editor_key += 1
-            st.sidebar.success("✅ データを復元しました！")
+            st.sidebar.success("✅ 基本設定・スタッフ条件・希望休をすべて復元しました！")
             st.rerun()
         except Exception as e:
             st.sidebar.error(f"読み込みエラー: ファイル形式を確認してください ({e})")
@@ -281,11 +357,21 @@ edited_req_df = st.data_editor(
 st.session_state.staff_df = edited_staff_df
 st.session_state.req_df = edited_req_df
 
+# ★保存用の「基本設定」データフレームを作成
+settings_df = pd.DataFrame([
+    {"設定項目": "対象年", "設定値": str(target_year)},
+    {"設定項目": "対象月", "設定値": str(target_month)},
+    {"設定項目": "月の日数", "設定値": str(TARGET_DAYS)},
+    {"設定項目": "休の日数", "設定値": str(TARGET_YASU)},
+    {"設定項目": "Qを配置しない日", "設定値": ",".join(map(str, sorted(Q_SHIFT_DAYS))) if Q_SHIFT_DAYS else "なし"},
+])
+
 save_req_df = edited_req_df.copy()
 save_req_df.columns = [PREV_COL] + [day_labels[int(c)] for c in day_cols]
 
 save_output = io.BytesIO()
 with pd.ExcelWriter(save_output, engine='openpyxl') as writer:
+    settings_df.to_excel(writer, sheet_name='基本設定', index=False)
     edited_staff_df.to_excel(writer, sheet_name='スタッフ設定', index=False)
     edited_ng_pairs_df.to_excel(writer, sheet_name='NGペア設定', index=False)
     save_req_df.to_excel(writer, sheet_name='希望休入力')
@@ -294,7 +380,7 @@ save_excel_bytes = save_output.getvalue()
 col_save1, col_save2 = st.columns([1, 1])
 with col_save1:
     st.download_button(
-        label="💾 現在の入力進捗（個人名・設定・NGペア・希望休）をExcelに一時保存",
+        label="💾 現在の入力進捗（基本設定・個人名・NGペア・希望休）をExcelに一時保存",
         data=save_excel_bytes,
         file_name=f"shift_progress_{target_year}_{target_month:02d}.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -491,7 +577,6 @@ def run_normal_mode():
             else:
                 model.Add(sum(B[s_idx, d, s_type] for d in range(TARGET_DAYS)) <= max_c)
 
-        # ★夜勤（入）の同日NGペア制約（同じ日に2人とも「入」になるのを禁止）
         for s1, s2, _ in ng_pairs:
             for d in range(TARGET_DAYS):
                 model.Add(B[s1, d, S_IRI] + B[s2, d, S_IRI] <= 1)
@@ -592,7 +677,6 @@ def run_debug_mode():
         else:
             add_soft(model.Add(sum(B[s_idx, d, s_type] for d in range(TARGET_DAYS)) <= max_c), 20, f"【個人条件違反】{desc}")
 
-    # ★夜勤（入）の同日NGペア制約（デバッグ用）
     for s1, s2, desc in ng_pairs:
         for d in range(TARGET_DAYS):
             add_soft(model.Add(B[s1, d, S_IRI] + B[s2, d, S_IRI] <= 1), 25, f"【NGペア違反】{day_labels[d+1]}: {desc}")
@@ -637,13 +721,14 @@ if st.button("🚀 シフト表を作成する", type="primary", use_container_w
             output = io.BytesIO()
             with pd.ExcelWriter(output, engine='openpyxl') as writer:
                 styled_result.to_excel(writer, sheet_name='完成シフト表')
+                settings_df.to_excel(writer, sheet_name='基本設定', index=False)
                 edited_staff_df.to_excel(writer, sheet_name='スタッフ設定', index=False)
                 edited_ng_pairs_df.to_excel(writer, sheet_name='NGペア設定', index=False)
                 save_req_df.to_excel(writer, sheet_name='希望休入力')
             excel_data = output.getvalue()
             
             st.download_button(
-                label="📥 完成したシフト表をExcelでダウンロード（色分け・回数集計・設定データ同梱）",
+                label="📥 完成したシフト表をExcelでダウンロード（色分け・回数集計・全設定データ同梱）",
                 data=excel_data,
                 file_name=f"shift_schedule_{target_year}_{target_month:02d}.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
