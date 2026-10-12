@@ -74,8 +74,10 @@ def extract_day_num(col_name):
         s = s.split("(")[0].strip()
     return int(s) if s.isdigit() else None
 
-# セッション状態の初期化（毎月の基本設定もセッションで保持）
+# セッション状態の初期化
 now = datetime.datetime.now()
+if "editor_key" not in st.session_state:
+    st.session_state.editor_key = 0
 if "setting_year" not in st.session_state:
     st.session_state.setting_year = now.year
 if "setting_month" not in st.session_state:
@@ -97,46 +99,47 @@ if "req_df" not in st.session_state:
     init_req = pd.DataFrame("", index=st.session_state.staff_df["スタッフ名"].tolist(), columns=init_cols)
     init_req[PREV_COL] = "0"
     st.session_state.req_df = init_req
-if "editor_key" not in st.session_state:
-    st.session_state.editor_key = 0
+
+ek = st.session_state.editor_key
 
 # =====================================================================
 # サイドバー（対象年月・基本設定・データの保存と復元）
 # =====================================================================
 st.sidebar.header("⚙️ 毎月の基本設定")
 
-# 対象年・月が変わったら月の日数を自動更新するコールバック
-def on_ym_change():
-    y = int(st.session_state.ym_year_input)
-    m = int(st.session_state.ym_month_input)
-    st.session_state.setting_year = y
-    st.session_state.setting_month = m
-    _, max_d = calendar.monthrange(y, m)
-    st.session_state.setting_days = max_d
-    st.session_state.setting_q_days = [d for d in st.session_state.setting_q_days if d <= max_d]
-
 col_y, col_m = st.sidebar.columns(2)
-target_year = int(col_y.number_input(
+new_year = int(col_y.number_input(
     "対象年", min_value=2024, max_value=2035,
     value=int(st.session_state.setting_year),
-    key="ym_year_input", on_change=on_ym_change
+    key=f"ym_year_{ek}"
 ))
-target_month = int(col_m.number_input(
+new_month = int(col_m.number_input(
     "対象月", min_value=1, max_value=12,
     value=int(st.session_state.setting_month),
-    key="ym_month_input", on_change=on_ym_change
+    key=f"ym_month_{ek}"
 ))
-st.session_state.setting_year = target_year
-st.session_state.setting_month = target_month
+
+# 画面上で対象年・月が手動で変更されたら、月の日数を自動計算して連動させる
+if new_year != st.session_state.setting_year or new_month != st.session_state.setting_month:
+    st.session_state.setting_year = new_year
+    st.session_state.setting_month = new_month
+    _, max_d = calendar.monthrange(new_year, new_month)
+    st.session_state.setting_days = max_d
+    st.session_state.setting_q_days = [d for d in st.session_state.setting_q_days if d <= max_d]
+    st.session_state.editor_key += 1
+    st.rerun()
+
+target_year = st.session_state.setting_year
+target_month = st.session_state.setting_month
 
 TARGET_DAYS = int(st.sidebar.number_input(
     "月の日数（自動計算）", min_value=28, max_value=31,
     value=int(st.session_state.setting_days),
-    key=f"days_input_{st.session_state.editor_key}_{target_year}_{target_month}"
+    key=f"days_input_{ek}"
 ))
 st.session_state.setting_days = TARGET_DAYS
 
-# 選択された年・月・日数から曜日ラベルを生成（例：2月に31日を指定した場合もエラーにならない安全設計）
+# 選択された年・月・日数から曜日ラベルを生成
 _, cal_max_days = calendar.monthrange(target_year, target_month)
 day_labels = {}
 for d in range(1, TARGET_DAYS + 1):
@@ -149,7 +152,7 @@ for d in range(1, TARGET_DAYS + 1):
 TARGET_YASU = int(st.sidebar.number_input(
     "全員が必ずとる「休＋希望休」の日数", min_value=1, max_value=15,
     value=int(st.session_state.setting_yasu),
-    key=f"yasu_input_{st.session_state.editor_key}"
+    key=f"yasu_input_{ek}"
 ))
 st.session_state.setting_yasu = TARGET_YASU
 
@@ -159,7 +162,7 @@ Q_SHIFT_DAYS = st.sidebar.multiselect(
     options=list(range(1, TARGET_DAYS + 1)),
     default=valid_q_defaults,
     format_func=lambda d: day_labels.get(d, str(d)),
-    key=f"q_days_input_{st.session_state.editor_key}_{TARGET_DAYS}"
+    key=f"q_days_input_{ek}_{TARGET_DAYS}"
 )
 st.session_state.setting_q_days = Q_SHIFT_DAYS
 
@@ -177,16 +180,14 @@ if uploaded_file is not None:
     if st.sidebar.button("🔄 データを画面に反映する", type="primary", use_container_width=True):
         try:
             xls = pd.ExcelFile(uploaded_file)
-            # ★基本設定（対象年月・日数・休の日数・Qを配置しない日）の復元
+            # ★基本設定（対象年月・日数・休の日数・Qを配置しない日）の安全な復元
             if "基本設定" in xls.sheet_names:
                 loaded_settings = pd.read_excel(xls, "基本設定")
                 settings_map = dict(zip(loaded_settings["設定項目"].astype(str), loaded_settings["設定値"]))
                 if "対象年" in settings_map and str(settings_map["対象年"]).replace('.', '', 1).isdigit():
                     st.session_state.setting_year = int(float(settings_map["対象年"]))
-                    st.session_state.ym_year_input = st.session_state.setting_year
                 if "対象月" in settings_map and str(settings_map["対象月"]).replace('.', '', 1).isdigit():
                     st.session_state.setting_month = int(float(settings_map["対象月"]))
-                    st.session_state.ym_month_input = st.session_state.setting_month
                 if "月の日数" in settings_map and str(settings_map["月の日数"]).replace('.', '', 1).isdigit():
                     st.session_state.setting_days = int(float(settings_map["月の日数"]))
                 if "休の日数" in settings_map and str(settings_map["休の日数"]).replace('.', '', 1).isdigit():
@@ -224,6 +225,8 @@ if uploaded_file is not None:
                         if d_num and 1 <= d_num <= 31:
                             normalized_req[str(d_num)] = loaded_req[col].values
                 st.session_state.req_df = normalized_req
+
+            # editor_key をカウントアップすることで、すべての入力欄をエラーなく最新値で再描画する
             st.session_state.editor_key += 1
             st.sidebar.success("✅ 基本設定・スタッフ条件・希望休をすべて復元しました！")
             st.rerun()
@@ -275,7 +278,7 @@ with st.expander("👥 スタッフ名（個人名への書き換え）・シフ
         num_rows="dynamic",
         use_container_width=True,
         height=min(420, 65 + len(st.session_state.staff_df) * 35),
-        key=f"staff_editor_{st.session_state.editor_key}"
+        key=f"staff_editor_{ek}"
     )
 
 raw_names = [str(n).strip() if pd.notna(n) and str(n).strip() != "" else f"スタッフ{i+1}" for i, n in enumerate(edited_staff_df["スタッフ名"])]
@@ -299,7 +302,7 @@ with st.expander("🚫 夜勤（入）の同日NGペア設定（特定の人と�
         column_config=ng_col_config,
         num_rows="dynamic",
         use_container_width=True,
-        key=f"ng_editor_{st.session_state.editor_key}"
+        key=f"ng_editor_{ek}"
     )
 st.session_state.ng_pairs_df = edited_ng_pairs_df
 
@@ -351,7 +354,7 @@ edited_req_df = st.data_editor(
     column_config=column_configuration,
     use_container_width=True,
     height=min(620, 65 + staffs * 35),
-    key=f"req_editor_{st.session_state.editor_key}"
+    key=f"req_editor_{ek}"
 )
 
 st.session_state.staff_df = edited_staff_df
