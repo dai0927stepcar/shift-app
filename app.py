@@ -9,7 +9,7 @@ st.set_page_config(page_title="シフト自動作成システム", layout="wide"
 st.title("📅 シフト自動作成システム")
 
 # =====================================================================
-# 🔒 パスワードロック機能（初期パスワード: 0927）
+# 🔒 パスワードロック機能
 # =====================================================================
 try:
     PASSWORD = st.secrets["APP_PASSWORD"]
@@ -50,7 +50,6 @@ WEEKDAYS_JP = ["月", "火", "水", "木", "金", "土", "日"]
 DEFAULT_STAFF_NAMES = [chr(ord('A') + i) for i in range(16)]
 DEFAULT_Q_DAYS = [1, 3, 6, 7, 8, 13, 14, 15, 17, 20, 22, 24, 27, 28, 29]
 
-# ★変更点1：コード内にあった個人の決め打ち条件を削除し、全員フラットにしました
 def get_default_staff_df():
     data = []
     for name in DEFAULT_STAFF_NAMES:
@@ -95,7 +94,7 @@ if "req_df" not in st.session_state:
 ek = st.session_state.editor_key
 
 # =====================================================================
-# サイドバー（対象年月・基本設定・データの保存と復元）
+# サイドバー
 # =====================================================================
 st.sidebar.header("⚙️ 毎月の基本設定")
 col_y, col_m = st.sidebar.columns(2)
@@ -278,7 +277,7 @@ with st.expander("🚫 夜勤（入）の同日NGペア設定", expanded=False):
 st.session_state.ng_pairs_df = edited_ng_pairs_df
 
 with st.expander("🔒 欠勤フォロー用：個別期間ロック設定（出勤停止などの期間を完全固定）", expanded=False):
-    st.caption("・「〇日から〇日まで休・有給にする」など、特定のスタッフの指定期間を画面の入力通りに完全固定します。\n・この期間内はAIによる自動調整（有給から休への振替など）が一切行われず、人間の指定配分が100%守られます。")
+    st.caption("・この期間内はAIによる自動調整が一切行われず、画面上で人間が指定した配分（有給や休）が100%守られます。")
     plock_col_config = {
         "スタッフ名": st.column_config.SelectboxColumn("スタッフ名", options=staff_names, required=True, width="medium"),
         "開始日": st.column_config.SelectboxColumn("開始日（〇日）", options=[str(i) for i in range(1, 32)], required=True, width="small"),
@@ -395,15 +394,16 @@ for s_idx, s_name in enumerate(staff_names):
             ORIGINAL_SHIFTS[(s_idx, d)] = str_to_shift[orig_str]
             ORIGINAL_STR_SHIFTS[(s_idx, d)] = orig_str
 
-        is_personal_locked = any(s == s_idx and start <= d <= end for s, start, end in PERSONAL_LOCKS)
-
         if "欠勤フォロー" not in mode:
             if val_str in str_to_shift: SPECIFIC_SHIFTS[(s_idx, d)] = str_to_shift[val_str]
         else:
             if val_str in str_to_shift:
+                is_personal_locked = any(s == s_idx and start <= d <= end for s, start, end in PERSONAL_LOCKS)
+                # ★要件定義対応：人間の指定（ロック、希望休、有給等）を絶対固定として扱う
                 if d <= LOCK_UNTIL_DAY: SPECIFIC_SHIFTS[(s_idx, d)] = str_to_shift[val_str]
                 elif is_personal_locked: SPECIFIC_SHIFTS[(s_idx, d)] = str_to_shift[val_str]
                 elif orig_str != "" and val_str != orig_str: SPECIFIC_SHIFTS[(s_idx, d)] = str_to_shift[val_str]
+                elif val_str in ["希望休", "休", "有給", "研修", "フリー"]: SPECIFIC_SHIFTS[(s_idx, d)] = str_to_shift[val_str]
 
 def get_personal_limits():
     limits = []
@@ -486,6 +486,7 @@ def run_normal_mode():
                 req_shift = SPECIFIC_SHIFTS.get((s, d+1))
                 if req_shift != S_YUKU: model.Add(B[s, d, S_YUKU] == 0)
                 if req_shift != S_KEN:  model.Add(B[s, d, S_KEN] == 0)
+                if req_shift != S_FREE: model.Add(B[s, d, S_FREE] == 0)
                 if req_shift is not None: model.Add(B[s, d, req_shift] == 1)
             model.Add(sum(B[s, d, S_YASU] for d in range(TARGET_DAYS)) == TARGET_YASU)
 
@@ -548,7 +549,7 @@ def run_normal_mode():
         return run_debug_mode()
 
 # =====================================================================
-# 計算ロジック2：🛠️ 欠勤フォロー（最小変更）モード
+# 計算ロジック2：🛠️ 欠勤フォロー（要件定義準拠・完全ルール）
 # =====================================================================
 def run_reschedule_mode():
     q_days_idx = [d - 1 for d in Q_SHIFT_DAYS]
@@ -556,35 +557,67 @@ def run_reschedule_mode():
     ng_pairs = get_ng_pairs()
     start_check_d = max(0, LOCK_UNTIL_DAY - 1)
 
-    def attempt_reschedule(consecutive_limit, strict_rank, yasu_flex_mode):
+    def attempt_reschedule(consecutive_limit, strict_rank):
         model = cp_model.CpModel()
         B = {(s, d, t): model.NewBoolVar(f'B_{s}_{d}_{t}') for s in range(staffs) for d in range(TARGET_DAYS) for t in range(9)}
         obj_terms = []
 
+        is_modified = [model.NewBoolVar(f'is_mod_{s}') for s in range(staffs)]
         for s in range(staffs):
+            # ③ 関わる人数を最小限にする（ペナルティ1000）
+            obj_terms.append(is_modified[s] * 1000)
+
+        for s in range(staffs):
+            # ① 公休数を規定数丁度にすること（絶対条件）
+            model.Add(sum(B[s, d, S_YASU] for d in range(TARGET_DAYS)) == TARGET_YASU)
+
             for d in range(TARGET_DAYS):
                 model.AddExactlyOne([B[s, d, t] for t in range(9)])
+                
                 req_shift = SPECIFIC_SHIFTS.get((s, d+1))
-                if req_shift != S_YUKU: model.Add(B[s, d, S_YUKU] == 0)
-                if req_shift != S_KEN:  model.Add(B[s, d, S_KEN] == 0)
-                if req_shift != S_FREE: model.Add(B[s, d, S_FREE] == 0)
-                if req_shift is not None:
-                    model.Add(B[s, d, req_shift] == 1)
+                orig_t = ORIGINAL_SHIFTS.get((s, d+1))
+                is_p_locked = any(p_s == s and start <= (d+1) <= end for p_s, start, end in PERSONAL_LOCKS)
 
-            yasu_sum = sum(B[s, d, S_YASU] for d in range(TARGET_DAYS))
-            req_yasu_cnt = sum(1 for d in range(1, TARGET_DAYS + 1) if str(edited_req_df.loc[staff_names[s], str(d)]).strip() in ["休", "希望休"])
-            target_y = max(TARGET_YASU, req_yasu_cnt)
-            
-            if yasu_flex_mode == "exact":
-                model.Add(yasu_sum == target_y)
-            else:
-                model.Add(yasu_sum >= max(0, TARGET_YASU - 1))
-                model.Add(yasu_sum <= max(TARGET_YASU + 2, req_yasu_cnt))
-                diff_y = model.NewIntVar(0, TARGET_DAYS, f'diff_y_{s}')
-                model.Add(diff_y >= yasu_sum - TARGET_YASU)
-                model.Add(diff_y >= TARGET_YASU - yasu_sum)
-                obj_terms.append(diff_y * 300)
+                # ベース制限：AIが勝手に有給・研修・フリーを新規作成するのを防ぐ
+                if req_shift != S_YUKU and orig_t != S_YUKU: model.Add(B[s, d, S_YUKU] == 0)
+                if req_shift != S_KEN and orig_t != S_KEN:  model.Add(B[s, d, S_KEN] == 0)
+                if req_shift != S_FREE and orig_t != S_FREE: model.Add(B[s, d, S_FREE] == 0)
 
+                # 期間ロックや過去日は絶対固定
+                if (d + 1) <= LOCK_UNTIL_DAY or is_p_locked:
+                    if req_shift is not None:
+                        model.Add(B[s, d, req_shift] == 1)
+                    elif orig_t is not None:
+                        model.Add(B[s, d, orig_t] == 1)
+                else:
+                    if req_shift == S_YUKU:
+                        # ① 例外：有給を休に変更することは許可（ペナルティは最も軽い1）
+                        model.Add(B[s, d, S_YUKU] + B[s, d, S_YASU] == 1)
+                        obj_terms.append(B[s, d, S_YASU] * 1)
+                    elif req_shift is not None:
+                        # ① 指定された希望休・休・出勤は絶対に固定
+                        model.Add(B[s, d, req_shift] == 1)
+                        if orig_t is not None and req_shift != orig_t:
+                            # ユーザーが意図的に変更したマスのため、この人は「変更に関わった人」とみなす
+                            model.Add(is_modified[s] == 1)
+
+                    if orig_t is not None:
+                        if req_shift == S_YUKU and orig_t == S_YUKU:
+                            # 有給から休への変換は「人を巻き込んだ(is_modified)」としてカウントしない（一番安い処理とするため）
+                            pass
+                        elif req_shift is None:
+                            # AIが自由に動かせるマス
+                            if orig_t == S_YASU:
+                                # 元々休だった日を動かすのはペナルティ20
+                                obj_terms.append((1 - B[s, d, S_YASU]) * 20)
+                            else:
+                                # ④ 関わるコマ数を最小にする（出勤の移動はペナルティ10）
+                                obj_terms.append((1 - B[s, d, orig_t]) * 10)
+                            
+                            # 元のシフトから変更されたら「巻き込まれた人」としてカウントする
+                            model.AddImplication(B[s, d, orig_t].Not(), is_modified[s])
+
+        # ② 一日の必要要件（早や遅の規定数）を守る事
         for d in range(LOCK_UNTIL_DAY, TARGET_DAYS):
             model.Add(sum(B[s, d, S_HAYA] for s in range(staffs)) == 3)
             model.Add(sum(B[s, d, S_OSO]  for s in range(staffs)) == 3)
@@ -593,6 +626,7 @@ def run_reschedule_mode():
             if d in q_days_idx: model.Add(sum(B[s, d, S_Q] for s in range(staffs)) == 0)
             else: model.Add(sum(B[s, d, S_Q] for s in range(staffs)) == 1)
 
+        # 順序ルール
         for s in range(staffs):
             for d in range(start_check_d, TARGET_DAYS - 1):
                 model.AddImplication(B[s, d, S_IRI], B[s, d+1, S_AKE])
@@ -603,6 +637,7 @@ def run_reschedule_mode():
                     model.AddImplication(B[s, d, S_OSO], B[s, d+1, S_HAYA].Not())
                     model.AddImplication(B[s, d, S_OSO], B[s, d+1, S_Q].Not())
 
+        # 連勤ルール
         for s in range(staffs):
             if LOCK_UNTIL_DAY == 0:
                 prev_c = PREV_CONSECUTIVE.get(s, 0)
@@ -613,51 +648,29 @@ def run_reschedule_mode():
                 if d + consecutive_limit - 1 >= LOCK_UNTIL_DAY:
                     model.Add(sum(B[s, d+k, S_YASU] + B[s, d+k, S_YUKU] for k in range(consecutive_limit)) >= 1)
 
+        # 個人上限ルール
         for s_idx, s_type, max_c, _ in personal_limits:
             locked_cnt = sum(1 for d in range(1, LOCK_UNTIL_DAY + 1) if SPECIFIC_SHIFTS.get((s_idx, d)) == s_type)
             eff_max = max(max_c, locked_cnt)
             if eff_max == 0: model.Add(sum(B[s_idx, d, s_type] for d in range(TARGET_DAYS)) == 0)
             else: model.Add(sum(B[s_idx, d, s_type] for d in range(TARGET_DAYS)) <= eff_max)
 
+        # NGペア
         for s1, s2, _ in ng_pairs:
             for d in range(LOCK_UNTIL_DAY, TARGET_DAYS): model.Add(B[s1, d, S_IRI] + B[s2, d, S_IRI] <= 1)
-
-        is_modified = [model.NewBoolVar(f'is_mod_{s}') for s in range(staffs)]
-        for s in range(staffs):
-            obj_terms.append(is_modified[s] * 100)
-
-        for s_idx in range(staffs):
-            for d in range(LOCK_UNTIL_DAY + 1, TARGET_DAYS + 1):
-                if (s_idx, d) not in SPECIFIC_SHIFTS:
-                    val_str = str(edited_req_df.loc[staff_names[s_idx], str(d)]).strip()
-                    orig_t = ORIGINAL_SHIFTS.get((s_idx, d))
-                    
-                    if orig_t is not None:
-                        model.AddImplication(B[s_idx, d - 1, orig_t].Not(), is_modified[s_idx])
-                    
-                    if val_str == "有給":
-                        obj_terms.append((1 - B[s_idx, d - 1, S_YUKU] - B[s_idx, d - 1, S_YASU]) * 200)
-                        obj_terms.append(B[s_idx, d - 1, S_YASU] * 15)
-                    elif val_str in ["希望休", "研修", "フリー"]:
-                        target_t = str_to_shift[val_str]
-                        obj_terms.append((1 - B[s_idx, d - 1, target_t]) * 200)
-                    elif orig_t is not None:
-                        weight = 20 if orig_t == S_YASU else 10
-                        obj_terms.append((1 - B[s_idx, d - 1, orig_t]) * weight)
 
         model.Minimize(sum(obj_terms))
         solver = cp_model.CpSolver()
         solver.parameters.num_search_workers = 8
         solver.parameters.max_time_in_seconds = 15.0
-        return solver.Solve(model), solver, B, consecutive_limit, strict_rank, yasu_flex_mode
+        return solver.Solve(model), solver, B, consecutive_limit, strict_rank
 
     steps = [
-        (5, True, "exact", "ステップ1"), (6, True, "exact", "ステップ2"), (6, False, "exact", "ステップ3"),
-        (5, True, "flex",  "ステップ4"), (6, False, "flex", "ステップ5"),
+        (5, True, "ステップ1"), (6, True, "ステップ2"), (6, False, "ステップ3")
     ]
-    for c_lim, s_rank, y_mode, label in steps:
+    for c_lim, s_rank, label in steps:
         with st.spinner(f"最小変更で再計算中...（{label}）"):
-            status, solver, B, used_limit, used_strict, used_ymode = attempt_reschedule(c_lim, s_rank, y_mode)
+            status, solver, B, used_limit, used_strict = attempt_reschedule(c_lim, s_rank)
         if status in [cp_model.OPTIMAL, cp_model.FEASIBLE]: break
 
     if status in [cp_model.OPTIMAL, cp_model.FEASIBLE]:
@@ -673,7 +686,6 @@ def run_reschedule_mode():
                 if orig_s != "" and orig_s != new_s:
                     tag = "手動変更（欠勤・指定）" if (s_idx, d) in SPECIFIC_SHIFTS and d > LOCK_UNTIL_DAY else "自動調整（フォロー）"
                     ui_changes.append(f"・ **{day_labels[d]} {s_name}さん** ： `{orig_s}` ➡️ **`{new_s}`**  【{tag}】")
-                    # Excelの表に出力するためのデータ
                     change_records.append({
                         "日付": day_labels[d],
                         "スタッフ名": s_name,
@@ -715,8 +727,17 @@ def run_debug_mode():
         for d in range(TARGET_DAYS):
             model.AddExactlyOne([B[s, d, t] for t in range(9)])
             req_shift = SPECIFIC_SHIFTS.get((s, d+1))
-            if req_shift != S_YUKU: model.Add(B[s, d, S_YUKU] == 0)
-            if req_shift != S_KEN:  model.Add(B[s, d, S_KEN] == 0)
+            orig_t = ORIGINAL_SHIFTS.get((s, d+1))
+            
+            if "欠勤フォロー" not in mode:
+                if req_shift != S_YUKU: model.Add(B[s, d, S_YUKU] == 0)
+                if req_shift != S_KEN:  model.Add(B[s, d, S_KEN] == 0)
+                if req_shift != S_FREE: model.Add(B[s, d, S_FREE] == 0)
+            else:
+                if req_shift != S_YUKU and orig_t != S_YUKU: model.Add(B[s, d, S_YUKU] == 0)
+                if req_shift != S_KEN and orig_t != S_KEN:  model.Add(B[s, d, S_KEN] == 0)
+                if req_shift != S_FREE and orig_t != S_FREE: model.Add(B[s, d, S_FREE] == 0)
+                
             if req_shift is not None: model.Add(B[s, d, req_shift] == 1)
 
     for s in range(staffs): add_soft(model.Add(sum(B[s, d, S_YASU] for d in range(TARGET_DAYS)) == TARGET_YASU), 50, f"【休数エラー】{staff_names[s]}さんの休が{TARGET_YASU}回ではありません")
@@ -790,11 +811,8 @@ if st.button(btn_label, type="primary", use_container_width=True):
             output = io.BytesIO()
             with pd.ExcelWriter(output, engine='openpyxl') as writer:
                 styled_result.to_excel(writer, sheet_name='完成シフト表')
-                
-                # ★変更依頼リストがあれば別シートとして書き出す
                 if not changes_df.empty:
                     changes_df.to_excel(writer, sheet_name='変更依頼リスト', index=False)
-                
                 settings_df.to_excel(writer, sheet_name='基本設定', index=False)
                 edited_staff_df.to_excel(writer, sheet_name='スタッフ設定', index=False)
                 edited_ng_pairs_df.to_excel(writer, sheet_name='NGペア設定', index=False)
