@@ -38,13 +38,12 @@ shift_str = {
     S_HAYA: '早', S_Q: 'Q', S_OSO: '遅', S_IRI: '入', 
     S_AKE: '明', S_YASU: '休', S_YUKU: '有給', S_KEN: '研修', S_FREE: 'フリー'
 }
-# 「希望休」も内部計算では S_YASU（休）として扱う
 str_to_shift = {v: k for k, v in shift_str.items()}
 str_to_shift['希望休'] = S_YASU
 
 shift_options = ["", "早", "Q", "遅", "入", "明", "希望休", "休", "有給", "研修", "フリー"]
 limit_options = ["制限なし"] + [str(i) for i in range(0, 32)]
-prev_work_options = [str(i) for i in range(0, 6)]  # 前月連勤の選択肢（0〜5日）
+prev_work_options = [str(i) for i in range(0, 6)]
 PREV_COL = "前月連勤"
 WEEKDAYS_JP = ["月", "火", "水", "木", "金", "土", "日"]
 
@@ -54,12 +53,12 @@ DEFAULT_Q_DAYS = [1, 3, 6, 7, 8, 13, 14, 15, 17, 20, 22, 24, 27, 28, 29]
 def get_default_staff_df():
     data = []
     for i, name in enumerate(DEFAULT_STAFF_NAMES):
-        haya_lim = "0" if i == 3 else "制限なし"  # 4人目(D)は早禁止
+        haya_lim = "0" if i == 3 else "制限なし"
         q_lim = "制限なし"
         oso_lim = "制限なし"
-        if i in [0, 1]: iri_lim = "2"             # 1, 2人目(A, B)は入2回まで
-        elif i in [2, 4]: iri_lim = "3"           # 3, 5人目(C, E)は入3回まで
-        elif i == 9: iri_lim = "0"                # 10人目(J)は入禁止
+        if i in [0, 1]: iri_lim = "2"
+        elif i in [2, 4]: iri_lim = "3"
+        elif i == 9: iri_lim = "0"
         else: iri_lim = "制限なし"
         data.append({"スタッフ名": name, "早の上限": haya_lim, "Qの上限": q_lim, "遅の上限": oso_lim, "入の上限": iri_lim})
     return pd.DataFrame(data)
@@ -69,36 +68,26 @@ def get_default_ng_pairs_df():
 
 def extract_day_num(col_name):
     s = str(col_name).strip()
-    if "(" in s:
-        s = s.split("(")[0].strip()
+    if "(" in s: s = s.split("(")[0].strip()
     return int(s) if s.isdigit() else None
 
 # セッション状態の初期化
 now = datetime.datetime.now()
-if "editor_key" not in st.session_state:
-    st.session_state.editor_key = 0
-if "setting_year" not in st.session_state:
-    st.session_state.setting_year = now.year
-if "setting_month" not in st.session_state:
-    st.session_state.setting_month = now.month
+if "editor_key" not in st.session_state: st.session_state.editor_key = 0
+if "setting_year" not in st.session_state: st.session_state.setting_year = now.year
+if "setting_month" not in st.session_state: st.session_state.setting_month = now.month
 if "setting_days" not in st.session_state:
     _, auto_d = calendar.monthrange(st.session_state.setting_year, st.session_state.setting_month)
     st.session_state.setting_days = auto_d
-if "setting_yasu" not in st.session_state:
-    st.session_state.setting_yasu = 9
+if "setting_yasu" not in st.session_state: st.session_state.setting_yasu = 9
 if "setting_q_days" not in st.session_state:
     st.session_state.setting_q_days = [d for d in DEFAULT_Q_DAYS if d <= st.session_state.setting_days]
-if "exec_mode" not in st.session_state:
-    st.session_state.exec_mode = "通常作成モード（高速・自動3段階緩和）"
-if "lock_until_day" not in st.session_state:
-    st.session_state.lock_until_day = 0
-if "base_schedule_df" not in st.session_state:
-    st.session_state.base_schedule_df = None
+if "exec_mode" not in st.session_state: st.session_state.exec_mode = "通常作成モード（高速・自動3段階緩和）"
+if "lock_until_day" not in st.session_state: st.session_state.lock_until_day = 0
+if "base_schedule_df" not in st.session_state: st.session_state.base_schedule_df = None
 
-if "staff_df" not in st.session_state:
-    st.session_state.staff_df = get_default_staff_df()
-if "ng_pairs_df" not in st.session_state:
-    st.session_state.ng_pairs_df = get_default_ng_pairs_df()
+if "staff_df" not in st.session_state: st.session_state.staff_df = get_default_staff_df()
+if "ng_pairs_df" not in st.session_state: st.session_state.ng_pairs_df = get_default_ng_pairs_df()
 if "req_df" not in st.session_state:
     init_cols = [PREV_COL] + [str(i) for i in range(1, 32)]
     init_req = pd.DataFrame("", index=st.session_state.staff_df["スタッフ名"].tolist(), columns=init_cols)
@@ -111,7 +100,6 @@ ek = st.session_state.editor_key
 # サイドバー（対象年月・基本設定・データの保存と復元）
 # =====================================================================
 st.sidebar.header("⚙️ 毎月の基本設定")
-
 col_y, col_m = st.sidebar.columns(2)
 new_year = int(col_y.number_input("対象年", min_value=2024, max_value=2035, value=int(st.session_state.setting_year), key=f"ym_year_{ek}"))
 new_month = int(col_m.number_input("対象月", min_value=1, max_value=12, value=int(st.session_state.setting_month), key=f"ym_month_{ek}"))
@@ -127,7 +115,6 @@ if new_year != st.session_state.setting_year or new_month != st.session_state.se
 
 target_year = st.session_state.setting_year
 target_month = st.session_state.setting_month
-
 TARGET_DAYS = int(st.sidebar.number_input("月の日数（自動計算）", min_value=28, max_value=31, value=int(st.session_state.setting_days), key=f"days_input_{ek}"))
 st.session_state.setting_days = TARGET_DAYS
 
@@ -142,11 +129,8 @@ for d in range(1, TARGET_DAYS + 1):
 
 TARGET_YASU = int(st.sidebar.number_input("全員が必ずとる「休＋希望休」の日数", min_value=1, max_value=15, value=int(st.session_state.setting_yasu), key=f"yasu_input_{ek}"))
 st.session_state.setting_yasu = TARGET_YASU
-
 valid_q_defaults = [d for d in st.session_state.setting_q_days if 1 <= d <= TARGET_DAYS]
-Q_SHIFT_DAYS = st.sidebar.multiselect(
-    "「Q」シフトを【配置しない】日", options=list(range(1, TARGET_DAYS + 1)), default=valid_q_defaults, format_func=lambda d: day_labels.get(d, str(d)), key=f"q_days_input_{ek}_{TARGET_DAYS}"
-)
+Q_SHIFT_DAYS = st.sidebar.multiselect("「Q」シフトを【配置しない】日", options=list(range(1, TARGET_DAYS + 1)), default=valid_q_defaults, format_func=lambda d: day_labels.get(d, str(d)), key=f"q_days_input_{ek}_{TARGET_DAYS}")
 st.session_state.setting_q_days = Q_SHIFT_DAYS
 
 mode_options = ["通常作成モード（高速・自動3段階緩和）", "🛠️ 欠勤フォロー（最小変更）モード", "原因調査モード（デバッグ用・強制出力）"]
@@ -155,43 +139,27 @@ mode = st.sidebar.radio("実行モード", mode_options, index=default_mode_idx,
 st.session_state.exec_mode = mode
 
 if "欠勤フォロー" in mode:
-    st.sidebar.info("💡 **欠勤フォロー手順**\n1. 下の表で欠勤者の該当日のシフトを「有給」や「希望休・休」に書き換えます。\n2. すでに終わった日（動かしたくない過去日）を下で指定して作成ボタンを押します。")
-    LOCK_UNTIL_DAY = int(st.sidebar.number_input(
-        "🔒 何日目までを過去日として完全固定するか（0＝固定なし）",
-        min_value=0, max_value=TARGET_DAYS - 1, value=min(int(st.session_state.lock_until_day), TARGET_DAYS - 1),
-        help="例：「15」にすると1日〜15日までの全シフトを固定し、16日以降のみ最小変更で組み直します。"
-    ))
+    st.sidebar.info("💡 **欠勤フォロー手順**\n1. 下の表で欠勤者の該当日のシフトを「有給」等に書き換えます。\n2. すでに終わった日（動かしたくない過去日）を下で指定して作成ボタンを押します。")
+    LOCK_UNTIL_DAY = int(st.sidebar.number_input("🔒 何日目までを過去日として完全固定するか（0＝固定なし）", min_value=0, max_value=TARGET_DAYS - 1, value=min(int(st.session_state.lock_until_day), TARGET_DAYS - 1)))
     st.session_state.lock_until_day = LOCK_UNTIL_DAY
 else:
     LOCK_UNTIL_DAY = 0
 
 st.sidebar.divider()
 st.sidebar.subheader("📂 保存データの読み込み")
-st.sidebar.caption("一時保存Excelや完成シフト表Excelを読み込めます。")
 
 def load_common_settings(xls):
     if "基本設定" in xls.sheet_names:
         loaded_settings = pd.read_excel(xls, "基本設定")
         settings_map = dict(zip(loaded_settings["設定項目"].astype(str), loaded_settings["設定値"]))
-        if "対象年" in settings_map and str(settings_map["対象年"]).replace('.', '', 1).isdigit():
-            st.session_state.setting_year = int(float(settings_map["対象年"]))
-        if "対象月" in settings_map and str(settings_map["対象月"]).replace('.', '', 1).isdigit():
-            st.session_state.setting_month = int(float(settings_map["対象月"]))
-        if "月の日数" in settings_map and str(settings_map["月の日数"]).replace('.', '', 1).isdigit():
-            st.session_state.setting_days = int(float(settings_map["月の日数"]))
-        if "休の日数" in settings_map and str(settings_map["休の日数"]).replace('.', '', 1).isdigit():
-            st.session_state.setting_yasu = int(float(settings_map["休の日数"]))
+        if "対象年" in settings_map and str(settings_map["対象年"]).replace('.', '', 1).isdigit(): st.session_state.setting_year = int(float(settings_map["対象年"]))
+        if "対象月" in settings_map and str(settings_map["対象月"]).replace('.', '', 1).isdigit(): st.session_state.setting_month = int(float(settings_map["対象月"]))
+        if "月の日数" in settings_map and str(settings_map["月の日数"]).replace('.', '', 1).isdigit(): st.session_state.setting_days = int(float(settings_map["月の日数"]))
+        if "休の日数" in settings_map and str(settings_map["休の日数"]).replace('.', '', 1).isdigit(): st.session_state.setting_yasu = int(float(settings_map["休の日数"]))
         if "Qを配置しない日" in settings_map:
             q_raw = str(settings_map["Qを配置しない日"]).strip()
-            if q_raw == "" or q_raw.lower() == "nan" or q_raw == "なし":
-                st.session_state.setting_q_days = []
-            else:
-                q_list = []
-                for x in q_raw.split(","):
-                    x_clean = x.strip().split(".")[0]
-                    if x_clean.isdigit():
-                        q_list.append(int(x_clean))
-                st.session_state.setting_q_days = q_list
+            if q_raw == "" or q_raw.lower() == "nan" or q_raw == "なし": st.session_state.setting_q_days = []
+            else: st.session_state.setting_q_days = [int(x.strip().split(".")[0]) for x in q_raw.split(",") if x.strip().split(".")[0].isdigit()]
     if "スタッフ設定" in xls.sheet_names:
         st.session_state.staff_df = pd.read_excel(xls, "スタッフ設定").fillna("制限なし").astype(str)
     if "NGペア設定" in xls.sheet_names:
@@ -216,8 +184,7 @@ if uploaded_file is not None:
                         normalized_req[PREV_COL] = cleaned_prev
                     else:
                         d_num = extract_day_num(col)
-                        if d_num and 1 <= d_num <= 31:
-                            normalized_req[str(d_num)] = loaded_req[col].values
+                        if d_num and 1 <= d_num <= 31: normalized_req[str(d_num)] = loaded_req[col].values
                 st.session_state.req_df = normalized_req
             st.session_state.base_schedule_df = None
             st.session_state.exec_mode = "通常作成モード（高速・自動3段階緩和）"
@@ -244,13 +211,11 @@ if uploaded_file is not None:
                     for idx_name in normalized_req.index:
                         if idx_name in loaded_req.index:
                             v = str(loaded_req.loc[idx_name, PREV_COL]).strip()
-                            if v.replace('.', '', 1).isdigit():
-                                normalized_req.loc[idx_name, PREV_COL] = str(int(float(v)))
+                            if v.replace('.', '', 1).isdigit(): normalized_req.loc[idx_name, PREV_COL] = str(int(float(v)))
 
             for col in loaded_sched.columns:
                 d_num = extract_day_num(col)
-                if d_num and 1 <= d_num <= 31:
-                    normalized_req[str(d_num)] = [str(v).strip() for v in loaded_sched[col].values]
+                if d_num and 1 <= d_num <= 31: normalized_req[str(d_num)] = [str(v).strip() for v in loaded_sched[col].values]
 
             if "スタッフ設定" not in xls.sheet_names:
                 new_s_list = [{"スタッフ名": s_name, "早の上限": "制限なし", "Qの上限": "制限なし", "遅の上限": "制限なし", "入の上限": "制限なし"} for s_name in loaded_sched.index.astype(str)]
@@ -270,7 +235,6 @@ if uploaded_file is not None:
 # =====================================================================
 st.subheader("1. スタッフ名・個人条件の設定")
 with st.expander("👥 スタッフ名（個人名への書き換え）・シフト上限・禁止条件を編集する", expanded=False):
-    st.caption("・左端の **「スタッフ名」** をダブルクリックすると個人名に書き換えられます。")
     with st.popover("📝 スタッフ名をまとめて一括変更する（コピペ入力）"):
         bulk_names_text = st.text_area("スタッフ名リストを入力（例：佐藤、鈴木、高橋...）", height=150)
         if st.button("名前を一括反映する", type="primary"):
@@ -279,17 +243,13 @@ with st.expander("👥 スタッフ名（個人名への書き換え）・シフ
                 new_staff_df = st.session_state.staff_df.copy()
                 old_req_df = st.session_state.req_df.copy()
                 for idx, new_name in enumerate(raw_list):
-                    if idx < len(new_staff_df):
-                        new_staff_df.loc[idx, "スタッフ名"] = new_name
-                    else:
-                        new_row = pd.DataFrame([{"スタッフ名": new_name, "早の上限": "制限なし", "Qの上限": "制限なし", "遅の上限": "制限なし", "入の上限": "制限なし"}])
-                        new_staff_df = pd.concat([new_staff_df, new_row], ignore_index=True)
+                    if idx < len(new_staff_df): new_staff_df.loc[idx, "スタッフ名"] = new_name
+                    else: new_staff_df = pd.concat([new_staff_df, pd.DataFrame([{"スタッフ名": new_name, "早の上限": "制限なし", "Qの上限": "制限なし", "遅の上限": "制限なし", "入の上限": "制限なし"}])], ignore_index=True)
                 st.session_state.staff_df = new_staff_df
                 updated_names = new_staff_df["スタッフ名"].tolist()
                 new_req_df = pd.DataFrame("", index=updated_names, columns=old_req_df.columns)
                 new_req_df[PREV_COL] = "0"
-                for i in range(min(len(old_req_df), len(updated_names))):
-                    new_req_df.iloc[i] = old_req_df.iloc[i].values
+                for i in range(min(len(old_req_df), len(updated_names))): new_req_df.iloc[i] = old_req_df.iloc[i].values
                 st.session_state.req_df = new_req_df
                 st.session_state.editor_key += 1
                 st.rerun()
@@ -306,13 +266,11 @@ with st.expander("👥 スタッフ名（個人名への書き換え）・シフ
 raw_names = [str(n).strip() if pd.notna(n) and str(n).strip() != "" else f"スタッフ{i+1}" for i, n in enumerate(edited_staff_df["スタッフ名"])]
 staff_names = []
 for i, name in enumerate(raw_names):
-    if name in staff_names:
-        staff_names.append(f"{name}_{i+1}")
-    else:
-        staff_names.append(name)
+    if name in staff_names: staff_names.append(f"{name}_{i+1}")
+    else: staff_names.append(name)
 staffs = len(staff_names)
 
-with st.expander("🚫 夜勤（入）の同日NGペア設定（特定の人と人を同時に「入」にしない）", expanded=False):
+with st.expander("🚫 夜勤（入）の同日NGペア設定", expanded=False):
     ng_col_config = {
         "スタッフ1": st.column_config.SelectboxColumn("スタッフ1", options=staff_names, required=True, width="medium"),
         "スタッフ2": st.column_config.SelectboxColumn("スタッフ2", options=staff_names, required=True, width="medium"),
@@ -321,17 +279,14 @@ with st.expander("🚫 夜勤（入）の同日NGペア設定（特定の人と�
 st.session_state.ng_pairs_df = edited_ng_pairs_df
 
 # =====================================================================
-# 2. メイン画面：希望休・指定シフトの入力表（または欠勤フォロー編集表）
+# 2. メイン画面：表
 # =====================================================================
 if "欠勤フォロー" in mode:
     st.subheader(f"2. 【欠勤フォローモード】現在のシフト表と欠勤箇所の編集（{target_year}年{target_month}月）")
     if LOCK_UNTIL_DAY > 0:
-        st.info(f"🔒 **1日 〜 {day_labels[LOCK_UNTIL_DAY]} までのシフトは「過去日」として完全にロック（固定）されます。**\n・急に休むことになったスタッフのマスを「有給」や「希望休・休」に書き換えて下の作成ボタンを押してください。\n・AIは**元のシフトからの変更被害を最小限に抑えつつ（出勤帯の入替を最優先し、希望休や有給はよほどの事がない限り動かしません）** 再計算します。")
-    else:
-        st.info("🛠️ **欠勤フォローモード中**：左メニューの「🔒 何日目までを過去日として完全固定するか」で今日までの日付を指定し、下の表で欠勤者のマスを「有給」等に書き換えてください。")
+        st.info(f"🔒 **1日 〜 {day_labels[LOCK_UNTIL_DAY]} は固定されます。**\n・急に休むことになったスタッフのマスを「有給」や「希望休・休」に書き換えて作成ボタンを押してください。\n・AIは**「変更される人数を極力減らし、特定の人の調整で乗り切る」「有給を休に振り替える手段も活用する」**という人間的な調整を行います。")
 else:
     st.subheader(f"2. 希望休・指定シフトの入力（{target_year}年{target_month}月）")
-    st.caption("・左端の **「前月連勤」** には、前月末時点での連続勤務日数（0〜5日）を選択してください。")
 
 day_cols = [str(i) for i in range(1, TARGET_DAYS + 1)]
 all_req_cols = [PREV_COL] + day_cols
@@ -352,9 +307,7 @@ for i, s_name in enumerate(staff_names):
                 val = str(prev_req.loc[old_name, c]).strip()
                 current_req_df.loc[s_name, c] = val if (c != PREV_COL or val in prev_work_options) else "0"
 
-column_configuration = {
-    PREV_COL: st.column_config.SelectboxColumn("前月連勤", options=prev_work_options, default="0", width="small", required=True)
-}
+column_configuration = {PREV_COL: st.column_config.SelectboxColumn("前月連勤", options=prev_work_options, default="0", width="small", required=True)}
 for i in range(1, TARGET_DAYS + 1):
     col_label = f"🔒{day_labels[i]}" if ("欠勤フォロー" in mode and i <= LOCK_UNTIL_DAY) else day_labels[i]
     column_configuration[str(i)] = st.column_config.SelectboxColumn(label=col_label, options=shift_options, default="", width="small")
@@ -362,18 +315,13 @@ for i in range(1, TARGET_DAYS + 1):
 edited_req_df = st.data_editor(current_req_df, column_config=column_configuration, use_container_width=True, height=min(620, 65 + staffs * 35), key=f"req_editor_{ek}")
 st.session_state.staff_df = edited_staff_df
 st.session_state.req_df = edited_req_df
-
-if "欠勤フォロー" in mode and st.session_state.base_schedule_df is None:
-    st.session_state.base_schedule_df = edited_req_df.copy()
+if "欠勤フォロー" in mode and st.session_state.base_schedule_df is None: st.session_state.base_schedule_df = edited_req_df.copy()
 
 settings_df = pd.DataFrame([
-    {"設定項目": "対象年", "設定値": str(target_year)},
-    {"設定項目": "対象月", "設定値": str(target_month)},
-    {"設定項目": "月の日数", "設定値": str(TARGET_DAYS)},
-    {"設定項目": "休の日数", "設定値": str(TARGET_YASU)},
+    {"設定項目": "対象年", "設定値": str(target_year)}, {"設定項目": "対象月", "設定値": str(target_month)},
+    {"設定項目": "月の日数", "設定値": str(TARGET_DAYS)}, {"設定項目": "休の日数", "設定値": str(TARGET_YASU)},
     {"設定項目": "Qを配置しない日", "設定値": ",".join(map(str, sorted(Q_SHIFT_DAYS))) if Q_SHIFT_DAYS else "なし"},
 ])
-
 save_req_df = edited_req_df.copy()
 save_req_df.columns = [PREV_COL] + [day_labels[int(c)] for c in day_cols]
 save_output = io.BytesIO()
@@ -385,8 +333,7 @@ with pd.ExcelWriter(save_output, engine='openpyxl') as writer:
 save_excel_bytes = save_output.getvalue()
 
 col_save1, col_save2 = st.columns([1, 1])
-with col_save1:
-    st.download_button("💾 現在の入力進捗をExcelに一時保存", data=save_excel_bytes, file_name=f"shift_progress_{target_year}_{target_month:02d}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
+with col_save1: st.download_button("💾 現在の入力進捗をExcelに一時保存", data=save_excel_bytes, file_name=f"shift_progress_{target_year}_{target_month:02d}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
 with col_save2:
     if "欠勤フォロー" in mode:
         if st.button("🧹 表を空欄に戻して「通常作成モード」へ戻る", use_container_width=True):
@@ -405,49 +352,33 @@ if st.sidebar.button("🔓 ログアウト"):
     st.rerun()
 
 # =====================================================================
-# 画面の表から 読み取り・設定
+# 画面データ読み取り
 # =====================================================================
-SPECIFIC_SHIFTS = {}
-KIBOU_YASU_CELLS = set()
-PREV_CONSECUTIVE = {}
-ORIGINAL_SHIFTS = {}      # {(s_idx, d): shift_int}
-ORIGINAL_STR_SHIFTS = {}  # {(s_idx, d): str}
-
+SPECIFIC_SHIFTS, KIBOU_YASU_CELLS, PREV_CONSECUTIVE, ORIGINAL_SHIFTS, ORIGINAL_STR_SHIFTS = {}, set(), {}, {}, {}
 base_df = st.session_state.base_schedule_df
 
 for s_idx, s_name in enumerate(staff_names):
     p_val = str(edited_req_df.loc[s_name, PREV_COL]).strip()
     PREV_CONSECUTIVE[s_idx] = int(p_val) if p_val.isdigit() else 0
-    
     for d in range(1, TARGET_DAYS + 1):
-        val = edited_req_df.loc[s_name, str(d)]
-        val_str = str(val).strip() if pd.notna(val) else ""
-        if val_str == "希望休":
-            KIBOU_YASU_CELLS.add((s_idx, d - 1))
+        val_str = str(edited_req_df.loc[s_name, str(d)]).strip() if pd.notna(edited_req_df.loc[s_name, str(d)]) else ""
+        if val_str == "希望休": KIBOU_YASU_CELLS.add((s_idx, d - 1))
 
         orig_str = ""
         if base_df is not None:
-            if s_name in base_df.index and str(d) in base_df.columns:
-                orig_str = str(base_df.loc[s_name, str(d)]).strip()
-            elif s_idx < len(base_df.index) and str(d) in base_df.columns:
-                orig_str = str(base_df.iloc[s_idx][str(d)]).strip()
+            if s_name in base_df.index and str(d) in base_df.columns: orig_str = str(base_df.loc[s_name, str(d)]).strip()
+            elif s_idx < len(base_df.index) and str(d) in base_df.columns: orig_str = str(base_df.iloc[s_idx][str(d)]).strip()
         if orig_str in str_to_shift:
             ORIGINAL_SHIFTS[(s_idx, d)] = str_to_shift[orig_str]
             ORIGINAL_STR_SHIFTS[(s_idx, d)] = orig_str
 
         if "欠勤フォロー" not in mode:
-            if val_str in str_to_shift:
-                SPECIFIC_SHIFTS[(s_idx, d)] = str_to_shift[val_str]
+            if val_str in str_to_shift: SPECIFIC_SHIFTS[(s_idx, d)] = str_to_shift[val_str]
         else:
-            # 欠勤フォローモード時の固定判定ルール
             if val_str in str_to_shift:
-                if d <= LOCK_UNTIL_DAY:
-                    # ロック期間（過去日）のシフトはすべて絶対固定
-                    SPECIFIC_SHIFTS[(s_idx, d)] = str_to_shift[val_str]
-                elif orig_str != "" and val_str != orig_str:
-                    # ユーザーが手動で書き換えたマス（急な有給や欠勤変更など）は絶対固定
-                    SPECIFIC_SHIFTS[(s_idx, d)] = str_to_shift[val_str]
-                # ※元からあった希望休や有給は絶対固定から外し、下の最小変更ロジック内で「ペナルティ200」として死守する
+                if d <= LOCK_UNTIL_DAY: SPECIFIC_SHIFTS[(s_idx, d)] = str_to_shift[val_str]
+                elif orig_str != "" and val_str != orig_str: SPECIFIC_SHIFTS[(s_idx, d)] = str_to_shift[val_str]
+                # ※欠勤フォローモードでは、元の希望休や有給は絶対固定せず、最小変更ロジック内でペナルティにより守る
 
 def get_personal_limits():
     limits = []
@@ -466,11 +397,9 @@ def get_ng_pairs():
     pairs = []
     seen = set()
     for _, row in edited_ng_pairs_df.iterrows():
-        n1 = str(row.get("スタッフ1", "")).strip()
-        n2 = str(row.get("スタッフ2", "")).strip()
+        n1, n2 = str(row.get("スタッフ1", "")).strip(), str(row.get("スタッフ2", "")).strip()
         if n1 in staff_names and n2 in staff_names and n1 != n2:
-            idx1 = staff_names.index(n1)
-            idx2 = staff_names.index(n2)
+            idx1, idx2 = staff_names.index(n1), staff_names.index(n2)
             pair_key = tuple(sorted((idx1, idx2)))
             if pair_key not in seen:
                 seen.add(pair_key)
@@ -480,17 +409,11 @@ def get_ng_pairs():
 def format_result_df(raw_table_data):
     for s_idx, d_idx in KIBOU_YASU_CELLS:
         if 0 <= s_idx < len(raw_table_data) and 0 <= d_idx < TARGET_DAYS:
-            if raw_table_data[s_idx][d_idx] == '休':
-                raw_table_data[s_idx][d_idx] = '希望休'
+            if raw_table_data[s_idx][d_idx] == '休': raw_table_data[s_idx][d_idx] = '希望休'
     cols = [day_labels[i] for i in range(1, TARGET_DAYS + 1)]
     df = pd.DataFrame(raw_table_data, index=staff_names, columns=cols)
-    df["【早】"] = (df[cols] == "早").sum(axis=1)
-    df["【Q】"] = (df[cols] == "Q").sum(axis=1)
-    df["【遅】"] = (df[cols] == "遅").sum(axis=1)
-    df["【入】"] = (df[cols] == "入").sum(axis=1)
-    df["【明】"] = (df[cols] == "明").sum(axis=1)
-    df["【休計】"] = ((df[cols] == "休") | (df[cols] == "希望休")).sum(axis=1)
-    df["【有給】"] = (df[cols] == "有給").sum(axis=1)
+    df["【早】"], df["【Q】"], df["【遅】"], df["【入】"], df["【明】"] = (df[cols] == "早").sum(axis=1), (df[cols] == "Q").sum(axis=1), (df[cols] == "遅").sum(axis=1), (df[cols] == "入").sum(axis=1), (df[cols] == "明").sum(axis=1)
+    df["【休計】"], df["【有給】"] = ((df[cols] == "休") | (df[cols] == "希望休")).sum(axis=1), (df[cols] == "有給").sum(axis=1)
     if (df[cols] == "研修").any().any(): df["【研修】"] = (df[cols] == "研修").sum(axis=1)
     if (df[cols] == "フリー").any().any(): df["【フリー】"] = (df[cols] == "フリー").sum(axis=1)
     return df
@@ -500,37 +423,23 @@ def style_shift_df(df):
         if val in ["休", "希望休"]: return "background-color: #ffcccc; color: #cc0000; font-weight: bold;"
         elif val == "有給": return "background-color: #cce5ff; color: #004085; font-weight: bold;"
         return ""
-    try:
-        return df.style.map(color_cell)
-    except AttributeError:
-        return df.style.applymap(color_cell)
+    try: return df.style.map(color_cell)
+    except AttributeError: return df.style.applymap(color_cell)
 
 def check_shortage():
     if staffs < 10:
-        st.error(f"❌ 現在のスタッフ数（{staffs}人）では、1日に必要な勤務枠（早3・遅3・入2・明2＝計10人）を満たせません。")
+        st.error(f"❌ 現在のスタッフ数（{staffs}人）では、1日に必要な勤務枠を満たせません。")
         return False
-    if "欠勤フォロー" in mode:
-        return True
-    
+    if "欠勤フォロー" in mode: return True
     total_slots = staffs * TARGET_DAYS
     work_slots = (3 + 3 + 2 + 2) * TARGET_DAYS + (TARGET_DAYS - len(Q_SHIFT_DAYS))
     specific_other_slots = sum(1 for (s, d), t in SPECIFIC_SHIFTS.items() if s < staffs and t not in [S_YASU, S_HAYA, S_OSO, S_IRI, S_AKE, S_Q])
-    available_slots = total_slots - work_slots - specific_other_slots
-    required_yasu = staffs * TARGET_YASU
-    shortage = required_yasu - available_slots
-    
-    if shortage > 0:
-        st.error(f"❌ 【重大なエラー：枠不足】指定された条件では、全員に「休（希望休含む）」を{TARGET_YASU}回配置することが物理的に不可能です。（必要な休の枠に対して 【 {shortage} 枠 】 足りません）")
+    if (staffs * TARGET_YASU) - (total_slots - work_slots - specific_other_slots) > 0:
+        st.error(f"❌ 【枠不足】全員に「休」を{TARGET_YASU}回配置することが物理的に不可能です。")
         return False
-        
     for s in range(staffs):
-        p_other = sum(1 for (s_idx, d_idx), t_idx in SPECIFIC_SHIFTS.items() if s_idx == s and t_idx not in [S_YASU, S_HAYA, S_OSO, S_IRI, S_AKE, S_Q])
-        p_yasu_req = sum(1 for (s_idx, d_idx), t_idx in SPECIFIC_SHIFTS.items() if s_idx == s and t_idx == S_YASU)
-        if p_yasu_req > TARGET_YASU:
-            st.error(f"❌ 【個人の希望休超過】{staff_names[s]}さんに「希望休・休」が {p_yasu_req} 回指定されています（設定された休の日数 {TARGET_YASU} 回を超えています）。")
-            return False
-        if TARGET_YASU - (TARGET_DAYS - p_other) > 0:
-            st.error(f"❌ 【個人の枠不足】{staff_names[s]}さんの有給・研修等の指定が多すぎるため、「休」を{TARGET_YASU}回配置できません。")
+        if sum(1 for (s_idx, d_idx), t_idx in SPECIFIC_SHIFTS.items() if s_idx == s and t_idx == S_YASU) > TARGET_YASU:
+            st.error(f"❌ 【希望休超過】{staff_names[s]}さんに休が {TARGET_YASU} 回を超えて指定されています。")
             return False
     return True
 
@@ -552,8 +461,7 @@ def run_normal_mode():
                 req_shift = SPECIFIC_SHIFTS.get((s, d+1))
                 if req_shift != S_YUKU: model.Add(B[s, d, S_YUKU] == 0)
                 if req_shift != S_KEN:  model.Add(B[s, d, S_KEN] == 0)
-                if req_shift is not None:
-                    model.Add(B[s, d, req_shift] == 1)
+                if req_shift is not None: model.Add(B[s, d, req_shift] == 1)
             model.Add(sum(B[s, d, S_YASU] for d in range(TARGET_DAYS)) == TARGET_YASU)
 
         for d in range(TARGET_DAYS):
@@ -578,8 +486,7 @@ def run_normal_mode():
             prev_c = PREV_CONSECUTIVE.get(s, 0)
             if prev_c > 0:
                 rem_days = max(1, consecutive_limit - prev_c)
-                if rem_days <= TARGET_DAYS:
-                    model.Add(sum(B[s, k, S_YASU] + B[s, k, S_YUKU] for k in range(rem_days)) >= 1)
+                if rem_days <= TARGET_DAYS: model.Add(sum(B[s, k, S_YASU] + B[s, k, S_YUKU] for k in range(rem_days)) >= 1)
             for d in range(TARGET_DAYS - consecutive_limit + 1):
                 model.Add(sum(B[s, d+k, S_YASU] + B[s, d+k, S_YUKU] for k in range(consecutive_limit)) >= 1)
 
@@ -611,7 +518,7 @@ def run_normal_mode():
         st.success("✅ シフト作成完了！")
         return format_result_df([[shift_str[next(t for t in range(9) if solver.Value(B[s, d, t]))] for d in range(TARGET_DAYS)] for s in range(staffs)])
     else:
-        st.error("❌ 条件が厳しすぎます。原因調査モードへ移行します...")
+        st.error("❌ 調査モードへ移行します...")
         return run_debug_mode()
 
 # =====================================================================
@@ -663,8 +570,7 @@ def run_reschedule_mode():
         for s in range(staffs):
             for d in range(start_check_d, TARGET_DAYS - 1):
                 model.AddImplication(B[s, d, S_IRI], B[s, d+1, S_AKE])
-                if d + 1 >= LOCK_UNTIL_DAY:
-                    model.AddImplication(B[s, d+1, S_AKE], B[s, d, S_IRI])
+                if d + 1 >= LOCK_UNTIL_DAY: model.AddImplication(B[s, d+1, S_AKE], B[s, d, S_IRI])
                 model.Add(B[s, d+1, S_YASU] + B[s, d+1, S_YUKU] >= B[s, d, S_AKE])
                 if strict_rank:
                     model.AddImplication(B[s, d, S_Q], B[s, d+1, S_HAYA].Not())
@@ -676,8 +582,7 @@ def run_reschedule_mode():
                 prev_c = PREV_CONSECUTIVE.get(s, 0)
                 if prev_c > 0:
                     rem_days = max(1, consecutive_limit - prev_c)
-                    if rem_days <= TARGET_DAYS:
-                        model.Add(sum(B[s, k, S_YASU] + B[s, k, S_YUKU] for k in range(rem_days)) >= 1)
+                    if rem_days <= TARGET_DAYS: model.Add(sum(B[s, k, S_YASU] + B[s, k, S_YUKU] for k in range(rem_days)) >= 1)
             for d in range(TARGET_DAYS - consecutive_limit + 1):
                 if d + consecutive_limit - 1 >= LOCK_UNTIL_DAY:
                     model.Add(sum(B[s, d+k, S_YASU] + B[s, d+k, S_YUKU] for k in range(consecutive_limit)) >= 1)
@@ -691,14 +596,26 @@ def run_reschedule_mode():
         for s1, s2, _ in ng_pairs:
             for d in range(LOCK_UNTIL_DAY, TARGET_DAYS): model.Add(B[s1, d, S_IRI] + B[s2, d, S_IRI] <= 1)
 
-        # ★目的関数：希望休・有給の移動には【重み200】の超強力なペナルティをかける
+        # ★影響人数の極小化 ＆ 有給のダウングレード（休への振替）許可
+        is_modified = [model.NewBoolVar(f'is_mod_{s}') for s in range(staffs)]
+        for s in range(staffs):
+            obj_terms.append(is_modified[s] * 100) # 1人変更を巻き込むごとに重み100
+
         for s_idx in range(staffs):
             for d in range(LOCK_UNTIL_DAY + 1, TARGET_DAYS + 1):
                 if (s_idx, d) not in SPECIFIC_SHIFTS:
                     val_str = str(edited_req_df.loc[staff_names[s_idx], str(d)]).strip()
                     orig_t = ORIGINAL_SHIFTS.get((s_idx, d))
                     
-                    if val_str in ["希望休", "有給", "研修", "フリー"]:
+                    if orig_t is not None:
+                        # 元のシフトから変更があった場合は is_modified を True に強制する
+                        model.AddImplication(B[s_idx, d - 1, orig_t].Not(), is_modified[s_idx])
+                    
+                    if val_str == "有給":
+                        # 有給を勤務にするのは重み200、公休(休)への振り替えは重み15で許容
+                        obj_terms.append((1 - B[s_idx, d - 1, S_YUKU] - B[s_idx, d - 1, S_YASU]) * 200)
+                        obj_terms.append(B[s_idx, d - 1, S_YASU] * 15)
+                    elif val_str in ["希望休", "研修", "フリー"]:
                         target_t = str_to_shift[val_str]
                         obj_terms.append((1 - B[s_idx, d - 1, target_t]) * 200)
                     elif orig_t is not None:
@@ -769,22 +686,21 @@ def run_debug_mode():
             if req_shift != S_KEN:  model.Add(B[s, d, S_KEN] == 0)
             if req_shift is not None: model.Add(B[s, d, req_shift] == 1)
 
-    for s in range(staffs):
-        add_soft(model.Add(sum(B[s, d, S_YASU] for d in range(TARGET_DAYS)) == TARGET_YASU), 50, f"【休数エラー】{staff_names[s]}さんの「休」が{TARGET_YASU}回ではありません")
+    for s in range(staffs): add_soft(model.Add(sum(B[s, d, S_YASU] for d in range(TARGET_DAYS)) == TARGET_YASU), 50, f"【休数エラー】{staff_names[s]}さんの休が{TARGET_YASU}回ではありません")
 
     for d in range(TARGET_DAYS):
-        add_soft(model.Add(sum(B[s, d, S_HAYA] for s in range(staffs)) == 3), 20, f"【人数エラー】{day_labels[d+1]}の「早番」が3人ではありません")
-        add_soft(model.Add(sum(B[s, d, S_OSO]  for s in range(staffs)) == 3), 20, f"【人数エラー】{day_labels[d+1]}の「遅番」が3人ではありません")
-        add_soft(model.Add(sum(B[s, d, S_IRI]  for s in range(staffs)) == 2), 20, f"【人数エラー】{day_labels[d+1]}の「入」が2人ではありません")
-        add_soft(model.Add(sum(B[s, d, S_AKE]  for s in range(staffs)) == 2), 20, f"【人数エラー】{day_labels[d+1]}の「明」が2人ではありません")
-        if d in q_days_idx: add_soft(model.Add(sum(B[s, d, S_Q] for s in range(staffs)) == 0), 20, f"【人数エラー】{day_labels[d+1]}に「Q」が配置されています")
-        else: add_soft(model.Add(sum(B[s, d, S_Q] for s in range(staffs)) == 1), 20, f"【人数エラー】{day_labels[d+1]}の「Q」が1人ではありません")
+        add_soft(model.Add(sum(B[s, d, S_HAYA] for s in range(staffs)) == 3), 20, f"【人数エラー】{day_labels[d+1]}の早番が3人ではありません")
+        add_soft(model.Add(sum(B[s, d, S_OSO]  for s in range(staffs)) == 3), 20, f"【人数エラー】{day_labels[d+1]}の遅番が3人ではありません")
+        add_soft(model.Add(sum(B[s, d, S_IRI]  for s in range(staffs)) == 2), 20, f"【人数エラー】{day_labels[d+1]}の入が2人ではありません")
+        add_soft(model.Add(sum(B[s, d, S_AKE]  for s in range(staffs)) == 2), 20, f"【人数エラー】{day_labels[d+1]}の明が2人ではありません")
+        if d in q_days_idx: add_soft(model.Add(sum(B[s, d, S_Q] for s in range(staffs)) == 0), 20, f"【人数エラー】{day_labels[d+1]}にQが配置されています")
+        else: add_soft(model.Add(sum(B[s, d, S_Q] for s in range(staffs)) == 1), 20, f"【人数エラー】{day_labels[d+1]}のQが1人ではありません")
 
     for s in range(staffs):
         for d in range(TARGET_DAYS - 1):
             add_soft(model.Add(B[s, d+1, S_AKE] >= B[s, d, S_IRI]), 50, f"【リレー違反】{staff_names[s]}さんの{day_labels[d+1]}「入」の次が「明」ではない")
             add_soft(model.Add(B[s, d, S_IRI] >= B[s, d+1, S_AKE]), 50, f"【リレー違反】{staff_names[s]}さんの{day_labels[d+2]}「明」の前が「入」ではない")
-            add_soft(model.Add(B[s, d+1, S_YASU] + B[s, d+1, S_YUKU] >= B[s, d, S_AKE]), 50, f"【リレー違反】{staff_names[s]}さんの{day_labels[d+1]}「明」の次が「休・有給」ではない")
+            add_soft(model.Add(B[s, d+1, S_YASU] + B[s, d+1, S_YUKU] >= B[s, d, S_AKE]), 50, f"【リレー違反】{staff_names[s]}さんの{day_labels[d+1]}「明」の次が休・有給ではない")
             add_soft(model.Add(B[s, d, S_Q] + B[s, d+1, S_HAYA] <= 1), 10, f"【順位違反】{staff_names[s]}さんの{day_labels[d+1]}「Q」の次に「早」")
             add_soft(model.Add(B[s, d, S_OSO] + B[s, d+1, S_HAYA] <= 1), 10, f"【順位違反】{staff_names[s]}さんの{day_labels[d+1]}「遅」の次に「早」")
             add_soft(model.Add(B[s, d, S_OSO] + B[s, d+1, S_Q] <= 1), 10, f"【順位違反】{staff_names[s]}さんの{day_labels[d+1]}「遅」の次に「Q」")
@@ -793,10 +709,8 @@ def run_debug_mode():
         prev_c = PREV_CONSECUTIVE.get(s, 0)
         if prev_c > 0:
             rem_days = max(1, 5 - prev_c)
-            if rem_days <= TARGET_DAYS:
-                add_soft(model.Add(sum(B[s, k, S_YASU] + B[s, k, S_YUKU] for k in range(rem_days)) >= 1), 15, f"【月初連勤超過】{staff_names[s]}さん（前月{prev_c}連勤）が1日目から{rem_days}日以内に休/有給がありません")
-        for d in range(TARGET_DAYS - 4):
-            add_soft(model.Add(sum(B[s, d+k, S_YASU] + B[s, d+k, S_YUKU] for k in range(5)) >= 1), 5, f"【連勤超過】{staff_names[s]}さんが{day_labels[d+1]}から連続オーバー")
+            if rem_days <= TARGET_DAYS: add_soft(model.Add(sum(B[s, k, S_YASU] + B[s, k, S_YUKU] for k in range(rem_days)) >= 1), 15, f"【月初連勤超過】{staff_names[s]}さんが{rem_days}日以内に休/有給なし")
+        for d in range(TARGET_DAYS - 4): add_soft(model.Add(sum(B[s, d+k, S_YASU] + B[s, d+k, S_YUKU] for k in range(5)) >= 1), 5, f"【連勤超過】{staff_names[s]}さんが{day_labels[d+1]}から連続オーバー")
 
     for s_idx, s_type, max_c, desc in personal_limits:
         if max_c == 0: add_soft(model.Add(sum(B[s_idx, d, s_type] for d in range(TARGET_DAYS)) == 0), 20, f"【条件違反】{desc}")
