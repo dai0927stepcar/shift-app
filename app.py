@@ -33,15 +33,16 @@ if not st.session_state.authenticated:
 # =====================================================================
 # 基本設定・定数
 # =====================================================================
-S_HAYA, S_Q, S_OSO, S_IRI, S_AKE, S_YASU, S_YUKU, S_KEN, S_FREE = range(9)
+# ★変更点：S_OJTを新設し、全部で10種類のシフトに拡張しました
+S_HAYA, S_Q, S_OSO, S_IRI, S_AKE, S_YASU, S_YUKU, S_KEN, S_FREE, S_OJT = range(10)
 shift_str = {
     S_HAYA: '早', S_Q: 'Q', S_OSO: '遅', S_IRI: '入', 
-    S_AKE: '明', S_YASU: '休', S_YUKU: '有給', S_KEN: '研修', S_FREE: 'フリー'
+    S_AKE: '明', S_YASU: '休', S_YUKU: '有給', S_KEN: '研修', S_FREE: 'フリー', S_OJT: 'OJT'
 }
 str_to_shift = {v: k for k, v in shift_str.items()}
 str_to_shift['希望休'] = S_YASU
 
-shift_options = ["", "早", "Q", "遅", "入", "明", "希望休", "休", "有給", "研修", "フリー"]
+shift_options = ["", "早", "Q", "遅", "入", "明", "希望休", "休", "有給", "研修", "OJT", "フリー"]
 limit_options = ["制限なし"] + [str(i) for i in range(0, 32)]
 prev_work_options = [str(i) for i in range(0, 6)]
 PREV_COL = "前月連勤"
@@ -394,16 +395,17 @@ for s_idx, s_name in enumerate(staff_names):
             ORIGINAL_SHIFTS[(s_idx, d)] = str_to_shift[orig_str]
             ORIGINAL_STR_SHIFTS[(s_idx, d)] = orig_str
 
+        is_personal_locked = any(s == s_idx and start <= d <= end for s, start, end in PERSONAL_LOCKS)
+
         if "欠勤フォロー" not in mode:
             if val_str in str_to_shift: SPECIFIC_SHIFTS[(s_idx, d)] = str_to_shift[val_str]
         else:
             if val_str in str_to_shift:
-                is_personal_locked = any(s == s_idx and start <= d <= end for s, start, end in PERSONAL_LOCKS)
-                # ★要件定義対応：人間の指定（ロック、希望休、有給等）を絶対固定として扱う
+                # OJTとフリーは「絶対固定（ハードロック）」の対象から外し、AIが自由に変更（バッファ利用）できるようにする
                 if d <= LOCK_UNTIL_DAY: SPECIFIC_SHIFTS[(s_idx, d)] = str_to_shift[val_str]
                 elif is_personal_locked: SPECIFIC_SHIFTS[(s_idx, d)] = str_to_shift[val_str]
                 elif orig_str != "" and val_str != orig_str: SPECIFIC_SHIFTS[(s_idx, d)] = str_to_shift[val_str]
-                elif val_str in ["希望休", "休", "有給", "研修", "フリー"]: SPECIFIC_SHIFTS[(s_idx, d)] = str_to_shift[val_str]
+                elif val_str in ["希望休", "休", "有給", "研修"]: SPECIFIC_SHIFTS[(s_idx, d)] = str_to_shift[val_str]
 
 def get_personal_limits():
     limits = []
@@ -440,6 +442,7 @@ def format_result_df(raw_table_data):
     df["【早】"], df["【Q】"], df["【遅】"], df["【入】"], df["【明】"] = (df[cols] == "早").sum(axis=1), (df[cols] == "Q").sum(axis=1), (df[cols] == "遅").sum(axis=1), (df[cols] == "入").sum(axis=1), (df[cols] == "明").sum(axis=1)
     df["【休計】"], df["【有給】"] = ((df[cols] == "休") | (df[cols] == "希望休")).sum(axis=1), (df[cols] == "有給").sum(axis=1)
     if (df[cols] == "研修").any().any(): df["【研修】"] = (df[cols] == "研修").sum(axis=1)
+    if (df[cols] == "OJT").any().any(): df["【OJT】"] = (df[cols] == "OJT").sum(axis=1)
     if (df[cols] == "フリー").any().any(): df["【フリー】"] = (df[cols] == "フリー").sum(axis=1)
     return df
 
@@ -478,15 +481,17 @@ def run_normal_mode():
     
     def attempt_fast_solve(consecutive_limit, strict_rank):
         model = cp_model.CpModel()
-        B = {(s, d, t): model.NewBoolVar(f'B_{s}_{d}_{t}') for s in range(staffs) for d in range(TARGET_DAYS) for t in range(9)}
+        # ★変数を10種類(S_OJT追加)に対応
+        B = {(s, d, t): model.NewBoolVar(f'B_{s}_{d}_{t}') for s in range(staffs) for d in range(TARGET_DAYS) for t in range(10)}
 
         for s in range(staffs):
             for d in range(TARGET_DAYS):
-                model.AddExactlyOne([B[s, d, t] for t in range(9)])
+                model.AddExactlyOne([B[s, d, t] for t in range(10)])
                 req_shift = SPECIFIC_SHIFTS.get((s, d+1))
                 if req_shift != S_YUKU: model.Add(B[s, d, S_YUKU] == 0)
                 if req_shift != S_KEN:  model.Add(B[s, d, S_KEN] == 0)
                 if req_shift != S_FREE: model.Add(B[s, d, S_FREE] == 0)
+                if req_shift != S_OJT:  model.Add(B[s, d, S_OJT] == 0)
                 if req_shift is not None: model.Add(B[s, d, req_shift] == 1)
             model.Add(sum(B[s, d, S_YASU] for d in range(TARGET_DAYS)) == TARGET_YASU)
 
@@ -542,7 +547,7 @@ def run_normal_mode():
 
     if status in [cp_model.OPTIMAL, cp_model.FEASIBLE]:
         st.success("✅ シフト作成完了！")
-        res_df = format_result_df([[shift_str[next(t for t in range(9) if solver.Value(B[s, d, t]))] for d in range(TARGET_DAYS)] for s in range(staffs)])
+        res_df = format_result_df([[shift_str[next(t for t in range(10) if solver.Value(B[s, d, t]))] for d in range(TARGET_DAYS)] for s in range(staffs)])
         return res_df, pd.DataFrame()
     else:
         st.error("❌ 条件が厳しすぎます。原因調査モードへ移行します...")
@@ -559,7 +564,7 @@ def run_reschedule_mode():
 
     def attempt_reschedule(consecutive_limit, strict_rank):
         model = cp_model.CpModel()
-        B = {(s, d, t): model.NewBoolVar(f'B_{s}_{d}_{t}') for s in range(staffs) for d in range(TARGET_DAYS) for t in range(9)}
+        B = {(s, d, t): model.NewBoolVar(f'B_{s}_{d}_{t}') for s in range(staffs) for d in range(TARGET_DAYS) for t in range(10)}
         obj_terms = []
 
         is_modified = [model.NewBoolVar(f'is_mod_{s}') for s in range(staffs)]
@@ -572,16 +577,17 @@ def run_reschedule_mode():
             model.Add(sum(B[s, d, S_YASU] for d in range(TARGET_DAYS)) == TARGET_YASU)
 
             for d in range(TARGET_DAYS):
-                model.AddExactlyOne([B[s, d, t] for t in range(9)])
+                model.AddExactlyOne([B[s, d, t] for t in range(10)])
                 
                 req_shift = SPECIFIC_SHIFTS.get((s, d+1))
                 orig_t = ORIGINAL_SHIFTS.get((s, d+1))
                 is_p_locked = any(p_s == s and start <= (d+1) <= end for p_s, start, end in PERSONAL_LOCKS)
 
-                # ベース制限：AIが勝手に有給・研修・フリーを新規作成するのを防ぐ
+                # ベース制限：AIが勝手に有給・研修・フリー・OJTを新規作成するのを防ぐ
                 if req_shift != S_YUKU and orig_t != S_YUKU: model.Add(B[s, d, S_YUKU] == 0)
                 if req_shift != S_KEN and orig_t != S_KEN:  model.Add(B[s, d, S_KEN] == 0)
                 if req_shift != S_FREE and orig_t != S_FREE: model.Add(B[s, d, S_FREE] == 0)
+                if req_shift != S_OJT and orig_t != S_OJT: model.Add(B[s, d, S_OJT] == 0)
 
                 # 期間ロックや過去日は絶対固定
                 if (d + 1) <= LOCK_UNTIL_DAY or is_p_locked:
@@ -595,7 +601,7 @@ def run_reschedule_mode():
                         model.Add(B[s, d, S_YUKU] + B[s, d, S_YASU] == 1)
                         obj_terms.append(B[s, d, S_YASU] * 1)
                     elif req_shift is not None:
-                        # ① 指定された希望休・休・出勤は絶対に固定
+                        # ① 指定された希望休・休・出勤・研修などは絶対に固定
                         model.Add(B[s, d, req_shift] == 1)
                         if orig_t is not None and req_shift != orig_t:
                             # ユーザーが意図的に変更したマスのため、この人は「変更に関わった人」とみなす
@@ -603,19 +609,22 @@ def run_reschedule_mode():
 
                     if orig_t is not None:
                         if req_shift == S_YUKU and orig_t == S_YUKU:
-                            # 有給から休への変換は「人を巻き込んだ(is_modified)」としてカウントしない（一番安い処理とするため）
+                            # 有給から休への変換は「人を巻き込んだ」としてカウントしない
                             pass
                         elif req_shift is None:
-                            # AIが自由に動かせるマス
-                            if orig_t == S_YASU:
-                                # 元々休だった日を動かすのはペナルティ20
-                                obj_terms.append((1 - B[s, d, S_YASU]) * 20)
+                            # AIが自由に動かせるマス（OJT・フリー・出勤等）
+                            if orig_t in [S_OJT, S_FREE]:
+                                # OJTとフリーはバッファ枠のため超低ペナルティ（5）で変更可能、かつ人を巻き込んだカウントにも入れない
+                                obj_terms.append((1 - B[s, d, orig_t]) * 5)
                             else:
-                                # ④ 関わるコマ数を最小にする（出勤の移動はペナルティ10）
-                                obj_terms.append((1 - B[s, d, orig_t]) * 10)
-                            
-                            # 元のシフトから変更されたら「巻き込まれた人」としてカウントする
-                            model.AddImplication(B[s, d, orig_t].Not(), is_modified[s])
+                                if orig_t == S_YASU:
+                                    # 元々休だった日を動かすのはペナルティ20
+                                    obj_terms.append((1 - B[s, d, S_YASU]) * 20)
+                                else:
+                                    # ④ 関わるコマ数を最小にする（出勤の移動はペナルティ10）
+                                    obj_terms.append((1 - B[s, d, orig_t]) * 10)
+                                # 元のシフトから変更されたら「巻き込まれた人」としてカウントする
+                                model.AddImplication(B[s, d, orig_t].Not(), is_modified[s])
 
         # ② 一日の必要要件（早や遅の規定数）を守る事
         for d in range(LOCK_UNTIL_DAY, TARGET_DAYS):
@@ -674,7 +683,7 @@ def run_reschedule_mode():
         if status in [cp_model.OPTIMAL, cp_model.FEASIBLE]: break
 
     if status in [cp_model.OPTIMAL, cp_model.FEASIBLE]:
-        raw_table = [[shift_str[next(t for t in range(9) if solver.Value(B[s, d, t]))] for d in range(TARGET_DAYS)] for s in range(staffs)]
+        raw_table = [[shift_str[next(t for t in range(10) if solver.Value(B[s, d, t]))] for d in range(TARGET_DAYS)] for s in range(staffs)]
         result_df = format_result_df(raw_table)
 
         ui_changes = []
@@ -713,7 +722,7 @@ def run_debug_mode():
     q_days_idx = [d - 1 for d in Q_SHIFT_DAYS]
     personal_limits = get_personal_limits()
     ng_pairs = get_ng_pairs()
-    B = {(s, d, t): model.NewBoolVar(f'B_{s}_{d}_{t}') for s in range(staffs) for d in range(TARGET_DAYS) for t in range(9)}
+    B = {(s, d, t): model.NewBoolVar(f'B_{s}_{d}_{t}') for s in range(staffs) for d in range(TARGET_DAYS) for t in range(10)}
     penalties = []
     violations_info = []
 
@@ -725,7 +734,7 @@ def run_debug_mode():
 
     for s in range(staffs):
         for d in range(TARGET_DAYS):
-            model.AddExactlyOne([B[s, d, t] for t in range(9)])
+            model.AddExactlyOne([B[s, d, t] for t in range(10)])
             req_shift = SPECIFIC_SHIFTS.get((s, d+1))
             orig_t = ORIGINAL_SHIFTS.get((s, d+1))
             
@@ -733,10 +742,12 @@ def run_debug_mode():
                 if req_shift != S_YUKU: model.Add(B[s, d, S_YUKU] == 0)
                 if req_shift != S_KEN:  model.Add(B[s, d, S_KEN] == 0)
                 if req_shift != S_FREE: model.Add(B[s, d, S_FREE] == 0)
+                if req_shift != S_OJT:  model.Add(B[s, d, S_OJT] == 0)
             else:
                 if req_shift != S_YUKU and orig_t != S_YUKU: model.Add(B[s, d, S_YUKU] == 0)
                 if req_shift != S_KEN and orig_t != S_KEN:  model.Add(B[s, d, S_KEN] == 0)
                 if req_shift != S_FREE and orig_t != S_FREE: model.Add(B[s, d, S_FREE] == 0)
+                if req_shift != S_OJT and orig_t != S_OJT: model.Add(B[s, d, S_OJT] == 0)
                 
             if req_shift is not None: model.Add(B[s, d, req_shift] == 1)
 
@@ -786,7 +797,7 @@ def run_debug_mode():
         else:
             st.error(f"🚨 以下のルールが衝突しています（計 {len(broken_rules)} 件）：")
             for rule in broken_rules: st.write(f"・ {rule}")
-        raw_table = [[shift_str[next(t for t in range(9) if solver.Value(B[s, d, t]))] for d in range(TARGET_DAYS)] for s in range(staffs)]
+        raw_table = [[shift_str[next(t for t in range(10) if solver.Value(B[s, d, t]))] for d in range(TARGET_DAYS)] for s in range(staffs)]
         return format_result_df(raw_table), pd.DataFrame()
     else:
         st.error("指定自体が矛盾しています。")
