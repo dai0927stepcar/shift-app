@@ -50,21 +50,18 @@ WEEKDAYS_JP = ["月", "火", "水", "木", "金", "土", "日"]
 DEFAULT_STAFF_NAMES = [chr(ord('A') + i) for i in range(16)]
 DEFAULT_Q_DAYS = [1, 3, 6, 7, 8, 13, 14, 15, 17, 20, 22, 24, 27, 28, 29]
 
+# ★変更点1：コード内にあった個人の決め打ち条件を削除し、全員フラットにしました
 def get_default_staff_df():
     data = []
-    for i, name in enumerate(DEFAULT_STAFF_NAMES):
-        haya_lim = "0" if i == 3 else "制限なし"
-        q_lim = "制限なし"
-        oso_lim = "制限なし"
-        if i in [0, 1]: iri_lim = "2"
-        elif i in [2, 4]: iri_lim = "3"
-        elif i == 9: iri_lim = "0"
-        else: iri_lim = "制限なし"
-        data.append({"スタッフ名": name, "早の上限": haya_lim, "Qの上限": q_lim, "遅の上限": oso_lim, "入の上限": iri_lim})
+    for name in DEFAULT_STAFF_NAMES:
+        data.append({"スタッフ名": name, "早の上限": "制限なし", "Qの上限": "制限なし", "遅の上限": "制限なし", "入の上限": "制限なし"})
     return pd.DataFrame(data)
 
 def get_default_ng_pairs_df():
     return pd.DataFrame({"スタッフ1": pd.Series(dtype="str"), "スタッフ2": pd.Series(dtype="str")})
+
+def get_default_personal_lock_df():
+    return pd.DataFrame({"スタッフ名": pd.Series(dtype="str"), "開始日": pd.Series(dtype="str"), "終了日": pd.Series(dtype="str")})
 
 def extract_day_num(col_name):
     s = str(col_name).strip()
@@ -88,6 +85,7 @@ if "base_schedule_df" not in st.session_state: st.session_state.base_schedule_df
 
 if "staff_df" not in st.session_state: st.session_state.staff_df = get_default_staff_df()
 if "ng_pairs_df" not in st.session_state: st.session_state.ng_pairs_df = get_default_ng_pairs_df()
+if "personal_lock_df" not in st.session_state: st.session_state.personal_lock_df = get_default_personal_lock_df()
 if "req_df" not in st.session_state:
     init_cols = [PREV_COL] + [str(i) for i in range(1, 32)]
     init_req = pd.DataFrame("", index=st.session_state.staff_df["スタッフ名"].tolist(), columns=init_cols)
@@ -121,11 +119,9 @@ st.session_state.setting_days = TARGET_DAYS
 _, cal_max_days = calendar.monthrange(target_year, target_month)
 day_labels = {}
 for d in range(1, TARGET_DAYS + 1):
-    if d <= cal_max_days:
-        wd = WEEKDAYS_JP[datetime.date(target_year, target_month, d).weekday()]
-        day_labels[d] = f"{d}({wd})"
-    else:
-        day_labels[d] = f"{d}"
+    if d <= cal_max_days: wd = WEEKDAYS_JP[datetime.date(target_year, target_month, d).weekday()]
+    else: wd = ""
+    day_labels[d] = f"{d}({wd})" if wd else f"{d}"
 
 TARGET_YASU = int(st.sidebar.number_input("全員が必ずとる「休＋希望休」の日数", min_value=1, max_value=15, value=int(st.session_state.setting_yasu), key=f"yasu_input_{ek}"))
 st.session_state.setting_yasu = TARGET_YASU
@@ -139,7 +135,7 @@ mode = st.sidebar.radio("実行モード", mode_options, index=default_mode_idx,
 st.session_state.exec_mode = mode
 
 if "欠勤フォロー" in mode:
-    st.sidebar.info("💡 **欠勤フォロー手順**\n1. 下の表で欠勤者の該当日のシフトを「有給」等に書き換えます。\n2. すでに終わった日（動かしたくない過去日）を下で指定して作成ボタンを押します。")
+    st.sidebar.info("💡 **欠勤フォロー手順**\n1. 下の表で欠勤者の該当日のシフトを書き換えます。\n2. すでに終わった日（動かしたくない過去日）を下で指定して作成ボタンを押します。")
     LOCK_UNTIL_DAY = int(st.sidebar.number_input("🔒 何日目までを過去日として完全固定するか（0＝固定なし）", min_value=0, max_value=TARGET_DAYS - 1, value=min(int(st.session_state.lock_until_day), TARGET_DAYS - 1)))
     st.session_state.lock_until_day = LOCK_UNTIL_DAY
 else:
@@ -164,8 +160,11 @@ def load_common_settings(xls):
         st.session_state.staff_df = pd.read_excel(xls, "スタッフ設定").fillna("制限なし").astype(str)
     if "NGペア設定" in xls.sheet_names:
         loaded_ng = pd.read_excel(xls, "NGペア設定").fillna("").astype(str)
-        if "スタッフ1" in loaded_ng.columns and "スタッフ2" in loaded_ng.columns:
-            st.session_state.ng_pairs_df = loaded_ng[["スタッフ1", "スタッフ2"]]
+        if "スタッフ1" in loaded_ng.columns and "スタッフ2" in loaded_ng.columns: st.session_state.ng_pairs_df = loaded_ng[["スタッフ1", "スタッフ2"]]
+    if "個別期間ロック設定" in xls.sheet_names:
+        loaded_plock = pd.read_excel(xls, "個別期間ロック設定").fillna("").astype(str)
+        if "スタッフ名" in loaded_plock.columns and "開始日" in loaded_plock.columns and "終了日" in loaded_plock.columns:
+            st.session_state.personal_lock_df = loaded_plock[["スタッフ名", "開始日", "終了日"]]
 
 uploaded_file = st.sidebar.file_uploader("Excelファイルを選択", type=["xlsx"])
 if uploaded_file is not None:
@@ -231,7 +230,7 @@ if uploaded_file is not None:
             st.sidebar.error(f"完成シフト表の読み込みエラー: {e}")
 
 # =====================================================================
-# 1. スタッフ名・個人条件・NGペアの設定
+# 1. スタッフ名・個人条件・NGペア等の設定
 # =====================================================================
 st.subheader("1. スタッフ名・個人条件の設定")
 with st.expander("👥 スタッフ名（個人名への書き換え）・シフト上限・禁止条件を編集する", expanded=False):
@@ -278,13 +277,23 @@ with st.expander("🚫 夜勤（入）の同日NGペア設定", expanded=False):
     edited_ng_pairs_df = st.data_editor(st.session_state.ng_pairs_df, column_config=ng_col_config, num_rows="dynamic", use_container_width=True, key=f"ng_editor_{ek}")
 st.session_state.ng_pairs_df = edited_ng_pairs_df
 
+with st.expander("🔒 欠勤フォロー用：個別期間ロック設定（出勤停止などの期間を完全固定）", expanded=False):
+    st.caption("・「〇日から〇日まで休・有給にする」など、特定のスタッフの指定期間を画面の入力通りに完全固定します。\n・この期間内はAIによる自動調整（有給から休への振替など）が一切行われず、人間の指定配分が100%守られます。")
+    plock_col_config = {
+        "スタッフ名": st.column_config.SelectboxColumn("スタッフ名", options=staff_names, required=True, width="medium"),
+        "開始日": st.column_config.SelectboxColumn("開始日（〇日）", options=[str(i) for i in range(1, 32)], required=True, width="small"),
+        "終了日": st.column_config.SelectboxColumn("終了日（〇日）", options=[str(i) for i in range(1, 32)], required=True, width="small"),
+    }
+    edited_personal_lock_df = st.data_editor(st.session_state.personal_lock_df, column_config=plock_col_config, num_rows="dynamic", use_container_width=True, key=f"plock_editor_{ek}")
+st.session_state.personal_lock_df = edited_personal_lock_df
+
 # =====================================================================
 # 2. メイン画面：表
 # =====================================================================
 if "欠勤フォロー" in mode:
     st.subheader(f"2. 【欠勤フォローモード】現在のシフト表と欠勤箇所の編集（{target_year}年{target_month}月）")
     if LOCK_UNTIL_DAY > 0:
-        st.info(f"🔒 **1日 〜 {day_labels[LOCK_UNTIL_DAY]} は固定されます。**\n・急に休むことになったスタッフのマスを「有給」や「希望休・休」に書き換えて作成ボタンを押してください。\n・AIは**「変更される人数を極力減らし、特定の人の調整で乗り切る」「有給を休に振り替える手段も活用する」**という人間的な調整を行います。")
+        st.info(f"🔒 **1日 〜 {day_labels[LOCK_UNTIL_DAY]} は固定されます。**\n・出勤停止などの場合は「個別期間ロック設定」も併用し、対象日のマスを人間が管理したい配分（休・有給）に書き換えてください。")
 else:
     st.subheader(f"2. 希望休・指定シフトの入力（{target_year}年{target_month}月）")
 
@@ -329,6 +338,7 @@ with pd.ExcelWriter(save_output, engine='openpyxl') as writer:
     settings_df.to_excel(writer, sheet_name='基本設定', index=False)
     edited_staff_df.to_excel(writer, sheet_name='スタッフ設定', index=False)
     edited_ng_pairs_df.to_excel(writer, sheet_name='NGペア設定', index=False)
+    edited_personal_lock_df.to_excel(writer, sheet_name='個別期間ロック設定', index=False)
     save_req_df.to_excel(writer, sheet_name='希望休入力')
 save_excel_bytes = save_output.getvalue()
 
@@ -354,6 +364,19 @@ if st.sidebar.button("🔓 ログアウト"):
 # =====================================================================
 # 画面データ読み取り
 # =====================================================================
+def get_personal_locks():
+    locks = []
+    for _, row in edited_personal_lock_df.iterrows():
+        s_name = str(row.get("スタッフ名", "")).strip()
+        start = str(row.get("開始日", "")).strip()
+        end = str(row.get("終了日", "")).strip()
+        if s_name in staff_names and start.isdigit() and end.isdigit():
+            st_d = min(int(start), int(end))
+            en_d = max(int(start), int(end))
+            locks.append((staff_names.index(s_name), st_d, en_d))
+    return locks
+
+PERSONAL_LOCKS = get_personal_locks()
 SPECIFIC_SHIFTS, KIBOU_YASU_CELLS, PREV_CONSECUTIVE, ORIGINAL_SHIFTS, ORIGINAL_STR_SHIFTS = {}, set(), {}, {}, {}
 base_df = st.session_state.base_schedule_df
 
@@ -372,13 +395,15 @@ for s_idx, s_name in enumerate(staff_names):
             ORIGINAL_SHIFTS[(s_idx, d)] = str_to_shift[orig_str]
             ORIGINAL_STR_SHIFTS[(s_idx, d)] = orig_str
 
+        is_personal_locked = any(s == s_idx and start <= d <= end for s, start, end in PERSONAL_LOCKS)
+
         if "欠勤フォロー" not in mode:
             if val_str in str_to_shift: SPECIFIC_SHIFTS[(s_idx, d)] = str_to_shift[val_str]
         else:
             if val_str in str_to_shift:
                 if d <= LOCK_UNTIL_DAY: SPECIFIC_SHIFTS[(s_idx, d)] = str_to_shift[val_str]
+                elif is_personal_locked: SPECIFIC_SHIFTS[(s_idx, d)] = str_to_shift[val_str]
                 elif orig_str != "" and val_str != orig_str: SPECIFIC_SHIFTS[(s_idx, d)] = str_to_shift[val_str]
-                # ※欠勤フォローモードでは、元の希望休や有給は絶対固定せず、最小変更ロジック内でペナルティにより守る
 
 def get_personal_limits():
     limits = []
@@ -516,9 +541,10 @@ def run_normal_mode():
 
     if status in [cp_model.OPTIMAL, cp_model.FEASIBLE]:
         st.success("✅ シフト作成完了！")
-        return format_result_df([[shift_str[next(t for t in range(9) if solver.Value(B[s, d, t]))] for d in range(TARGET_DAYS)] for s in range(staffs)])
+        res_df = format_result_df([[shift_str[next(t for t in range(9) if solver.Value(B[s, d, t]))] for d in range(TARGET_DAYS)] for s in range(staffs)])
+        return res_df, pd.DataFrame()
     else:
-        st.error("❌ 調査モードへ移行します...")
+        st.error("❌ 条件が厳しすぎます。原因調査モードへ移行します...")
         return run_debug_mode()
 
 # =====================================================================
@@ -596,10 +622,9 @@ def run_reschedule_mode():
         for s1, s2, _ in ng_pairs:
             for d in range(LOCK_UNTIL_DAY, TARGET_DAYS): model.Add(B[s1, d, S_IRI] + B[s2, d, S_IRI] <= 1)
 
-        # ★影響人数の極小化 ＆ 有給のダウングレード（休への振替）許可
         is_modified = [model.NewBoolVar(f'is_mod_{s}') for s in range(staffs)]
         for s in range(staffs):
-            obj_terms.append(is_modified[s] * 100) # 1人変更を巻き込むごとに重み100
+            obj_terms.append(is_modified[s] * 100)
 
         for s_idx in range(staffs):
             for d in range(LOCK_UNTIL_DAY + 1, TARGET_DAYS + 1):
@@ -608,11 +633,9 @@ def run_reschedule_mode():
                     orig_t = ORIGINAL_SHIFTS.get((s_idx, d))
                     
                     if orig_t is not None:
-                        # 元のシフトから変更があった場合は is_modified を True に強制する
                         model.AddImplication(B[s_idx, d - 1, orig_t].Not(), is_modified[s_idx])
                     
                     if val_str == "有給":
-                        # 有給を勤務にするのは重み200、公休(休)への振り替えは重み15で許容
                         obj_terms.append((1 - B[s_idx, d - 1, S_YUKU] - B[s_idx, d - 1, S_YASU]) * 200)
                         obj_terms.append(B[s_idx, d - 1, S_YASU] * 15)
                     elif val_str in ["希望休", "研修", "フリー"]:
@@ -641,21 +664,31 @@ def run_reschedule_mode():
         raw_table = [[shift_str[next(t for t in range(9) if solver.Value(B[s, d, t]))] for d in range(TARGET_DAYS)] for s in range(staffs)]
         result_df = format_result_df(raw_table)
 
-        changes = []
+        ui_changes = []
+        change_records = []
         for s_idx, s_name in enumerate(staff_names):
             for d in range(1, TARGET_DAYS + 1):
                 orig_s = ORIGINAL_STR_SHIFTS.get((s_idx, d), "")
                 new_s = result_df.loc[s_name, day_labels[d]]
                 if orig_s != "" and orig_s != new_s:
-                    tag = "【手動変更】" if (s_idx, d) in SPECIFIC_SHIFTS and d > LOCK_UNTIL_DAY else "【自動調整】"
-                    changes.append(f"・ **{day_labels[d]} {s_name}さん** ： `{orig_s}` ➡️ **`{new_s}`**  {tag}")
+                    tag = "手動変更（欠勤・指定）" if (s_idx, d) in SPECIFIC_SHIFTS and d > LOCK_UNTIL_DAY else "自動調整（フォロー）"
+                    ui_changes.append(f"・ **{day_labels[d]} {s_name}さん** ： `{orig_s}` ➡️ **`{new_s}`**  【{tag}】")
+                    # Excelの表に出力するためのデータ
+                    change_records.append({
+                        "日付": day_labels[d],
+                        "スタッフ名": s_name,
+                        "変更前": orig_s,
+                        "変更後": new_s,
+                        "備考": tag
+                    })
 
-        st.success(f"✅ 最小変更でのシフト再作成が完了しました！（総変更：{len(changes)} 箇所）")
-        with st.expander(f"📝 元のシフト表から変更された箇所の一覧を見る（計 {len(changes)} 箇所）", expanded=True):
-            if not changes: st.write("変更された箇所はありません。")
+        changes_df = pd.DataFrame(change_records)
+        st.success(f"✅ 最小変更でのシフト再作成が完了しました！（総変更：{len(ui_changes)} 箇所）")
+        with st.expander(f"📝 元のシフト表から変更された箇所の一覧を見る（計 {len(ui_changes)} 箇所）", expanded=True):
+            if not ui_changes: st.write("変更された箇所はありません。")
             else:
-                for ch in changes: st.markdown(ch)
-        return result_df
+                for ch in ui_changes: st.markdown(ch)
+        return result_df, changes_df
     else:
         st.error("❌ 最小変更モードでは組めませんでした。原因調査モードへ移行します...")
         return run_debug_mode()
@@ -733,10 +766,10 @@ def run_debug_mode():
             st.error(f"🚨 以下のルールが衝突しています（計 {len(broken_rules)} 件）：")
             for rule in broken_rules: st.write(f"・ {rule}")
         raw_table = [[shift_str[next(t for t in range(9) if solver.Value(B[s, d, t]))] for d in range(TARGET_DAYS)] for s in range(staffs)]
-        return format_result_df(raw_table)
+        return format_result_df(raw_table), pd.DataFrame()
     else:
         st.error("指定自体が矛盾しています。")
-        return pd.DataFrame()
+        return pd.DataFrame(), pd.DataFrame()
 
 # =====================================================================
 # 3. 実行ボタンと結果出力
@@ -746,9 +779,9 @@ btn_label = "🛠️ 最小変更でシフトを再作成する（欠勤フォ�
 
 if st.button(btn_label, type="primary", use_container_width=True):
     if check_shortage():
-        if "通常作成" in mode: result_df = run_normal_mode()
-        elif "欠勤フォロー" in mode: result_df = run_reschedule_mode()
-        else: result_df = run_debug_mode()
+        if "通常作成" in mode: result_df, changes_df = run_normal_mode()
+        elif "欠勤フォロー" in mode: result_df, changes_df = run_reschedule_mode()
+        else: result_df, changes_df = run_debug_mode()
             
         if not result_df.empty:
             styled_result = style_shift_df(result_df)
@@ -757,9 +790,15 @@ if st.button(btn_label, type="primary", use_container_width=True):
             output = io.BytesIO()
             with pd.ExcelWriter(output, engine='openpyxl') as writer:
                 styled_result.to_excel(writer, sheet_name='完成シフト表')
+                
+                # ★変更依頼リストがあれば別シートとして書き出す
+                if not changes_df.empty:
+                    changes_df.to_excel(writer, sheet_name='変更依頼リスト', index=False)
+                
                 settings_df.to_excel(writer, sheet_name='基本設定', index=False)
                 edited_staff_df.to_excel(writer, sheet_name='スタッフ設定', index=False)
                 edited_ng_pairs_df.to_excel(writer, sheet_name='NGペア設定', index=False)
+                edited_personal_lock_df.to_excel(writer, sheet_name='個別期間ロック設定', index=False)
                 save_req_df.to_excel(writer, sheet_name='希望休入力')
             excel_data = output.getvalue()
             
