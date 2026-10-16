@@ -69,7 +69,6 @@ def extract_day_num(col_name):
     if "(" in s: s = s.split("(")[0].strip()
     return int(s) if s.isdigit() else None
 
-# ★新規追加：Excelにプルダウン（データの入力規則）を設定する関数
 def apply_excel_dropdowns(writer, staffs_count, target_days):
     shift_list = '"早,Q,遅,入,明,希望休,休,有給,研修,OJT,フリー"'
     
@@ -77,7 +76,6 @@ def apply_excel_dropdowns(writer, staffs_count, target_days):
         ws_req = writer.sheets['希望休入力']
         dv_req = DataValidation(type="list", formula1=shift_list, allow_blank=True)
         ws_req.add_data_validation(dv_req)
-        # B列は前月連勤、C列から月末までがシフト入力欄
         dv_req.add(f"C2:{get_column_letter(2 + target_days)}{1 + staffs_count}")
         
         dv_prev = DataValidation(type="list", formula1='"0,1,2,3,4,5"', allow_blank=True)
@@ -88,7 +86,6 @@ def apply_excel_dropdowns(writer, staffs_count, target_days):
         ws_res = writer.sheets['完成シフト表']
         dv_res = DataValidation(type="list", formula1=shift_list, allow_blank=True)
         ws_res.add_data_validation(dv_res)
-        # 完成シフト表はA列が名前、B列から月末までがシフト入力欄
         dv_res.add(f"B2:{get_column_letter(1 + target_days)}{1 + staffs_count}")
 
 # セッション状態の初期化
@@ -357,8 +354,6 @@ settings_df = pd.DataFrame([
 save_req_df = edited_req_df.copy()
 save_req_df.columns = [PREV_COL] + [day_labels[int(c)] for c in day_cols]
 save_output = io.BytesIO()
-
-# ★保存処理：プルダウンを追加してExcelを出力
 with pd.ExcelWriter(save_output, engine='openpyxl') as writer:
     settings_df.to_excel(writer, sheet_name='基本設定', index=False)
     edited_staff_df.to_excel(writer, sheet_name='スタッフ設定', index=False)
@@ -366,7 +361,6 @@ with pd.ExcelWriter(save_output, engine='openpyxl') as writer:
     edited_personal_lock_df.to_excel(writer, sheet_name='個別期間ロック設定', index=False)
     save_req_df.to_excel(writer, sheet_name='希望休入力')
     apply_excel_dropdowns(writer, staffs, TARGET_DAYS)
-
 save_excel_bytes = save_output.getvalue()
 
 col_save1, col_save2 = st.columns([1, 1])
@@ -480,21 +474,33 @@ def style_shift_df(df):
     try: return df.style.map(color_cell)
     except AttributeError: return df.style.applymap(color_cell)
 
+# ★修正ポイント1：すべてのモードで不足枠数を計算し表示。通常作成以外はエラーで止めずに警告として通す。
 def check_shortage():
     if staffs < 10:
         st.error(f"❌ 現在のスタッフ数（{staffs}人）では、1日に必要な勤務枠を満たせません。")
         return False
-    if "欠勤フォロー" in mode: return True
+    
     total_slots = staffs * TARGET_DAYS
     work_slots = (3 + 3 + 2 + 2) * TARGET_DAYS + (TARGET_DAYS - len(Q_SHIFT_DAYS))
     specific_other_slots = sum(1 for (s, d), t in SPECIFIC_SHIFTS.items() if s < staffs and t not in [S_YASU, S_HAYA, S_OSO, S_IRI, S_AKE, S_Q])
-    if (staffs * TARGET_YASU) - (total_slots - work_slots - specific_other_slots) > 0:
-        st.error(f"❌ 【枠不足】全員に「休」を{TARGET_YASU}回配置することが物理的に不可能です。")
-        return False
+    shortage = (staffs * TARGET_YASU) - (total_slots - work_slots - specific_other_slots)
+    
+    if shortage > 0:
+        if "通常作成" in mode:
+            st.error(f"❌ 【枠不足】全員に「休」を{TARGET_YASU}回配置することが物理的に不可能です。（{shortage} 枠不足しています）")
+            return False
+        else:
+            st.warning(f"⚠️ 【枠不足】全員に「休」を{TARGET_YASU}回配置することが物理的に不可能です。（{shortage} 枠不足しています）\n※不足分は休日出勤として自動調整されます。")
+            
+    if "欠勤フォロー" in mode: return True
+    
     for s in range(staffs):
         if sum(1 for (s_idx, d_idx), t_idx in SPECIFIC_SHIFTS.items() if s_idx == s and t_idx == S_YASU) > TARGET_YASU:
-            st.error(f"❌ 【希望休超過】{staff_names[s]}さんに休が {TARGET_YASU} 回を超えて指定されています。")
-            return False
+            if "通常作成" in mode:
+                st.error(f"❌ 【希望休超過】{staff_names[s]}さんに休が {TARGET_YASU} 回を超えて指定されています。")
+                return False
+            else:
+                st.warning(f"⚠️ 【希望休超過】{staff_names[s]}さんに休が {TARGET_YASU} 回を超えて指定されています。")
     return True
 
 # =====================================================================
@@ -592,8 +598,13 @@ def run_reschedule_mode():
         obj_terms = []
 
         is_modified = [model.NewBoolVar(f'is_mod_{s}') for s in range(staffs)]
+
         for s in range(staffs):
-            model.Add(sum(B[s, d, S_YASU] for d in range(TARGET_DAYS)) == TARGET_YASU)
+            # ★修正ポイント2：休の不足分を変数化し、最大のペナルティ（100,000）で許容（休日出勤）
+            yasu_sum = sum(B[s, d, S_YASU] for d in range(TARGET_DAYS))
+            shortage_y = model.NewIntVar(0, TARGET_DAYS, f'shortage_y_{s}')
+            model.Add(yasu_sum + shortage_y == TARGET_YASU)
+            obj_terms.append(shortage_y * 100000)
 
             for d in range(TARGET_DAYS):
                 model.AddExactlyOne([B[s, d, t] for t in range(10)])
@@ -628,13 +639,10 @@ def run_reschedule_mode():
                                 obj_terms.append((1 - B[s, d, orig_t]) * 5)
                             elif orig_t in [S_IRI, S_AKE]:
                                 obj_terms.append((1 - B[s, d, orig_t]) * 20)
-                                model.AddImplication(B[s, d, orig_t].Not(), is_modified[s])
                             elif orig_t == S_YASU:
                                 obj_terms.append((1 - B[s, d, S_YASU]) * 30)
-                                model.AddImplication(B[s, d, S_YASU].Not(), is_modified[s])
                             else:
                                 obj_terms.append((1 - B[s, d, orig_t]) * 10)
-                                model.AddImplication(B[s, d, orig_t].Not(), is_modified[s])
 
         for d in range(LOCK_UNTIL_DAY, TARGET_DAYS):
             model.Add(sum(B[s, d, S_HAYA] for s in range(staffs)) == 3)
@@ -754,7 +762,8 @@ def run_debug_mode():
                 
             if req_shift is not None: model.Add(B[s, d, req_shift] == 1)
 
-    for s in range(staffs): add_soft(model.Add(sum(B[s, d, S_YASU] for d in range(TARGET_DAYS)) == TARGET_YASU), 50, f"【休数エラー】{staff_names[s]}さんの休が{TARGET_YASU}回ではありません")
+    # ★修正ポイント3：デバッグモードでも休数エラーを最大のペナルティ（100,000）で計算し、エラーとしつつも出力を強行する
+    for s in range(staffs): add_soft(model.Add(sum(B[s, d, S_YASU] for d in range(TARGET_DAYS)) == TARGET_YASU), 100000, f"【休数エラー】{staff_names[s]}さんの休が{TARGET_YASU}回ではありません")
 
     for d in range(TARGET_DAYS):
         add_soft(model.Add(sum(B[s, d, S_HAYA] for s in range(staffs)) == 3), 20, f"【人数エラー】{day_labels[d+1]}の早番が3人ではありません")
@@ -783,6 +792,9 @@ def run_debug_mode():
     for s_idx, s_type, max_c, desc in personal_limits:
         if max_c == 0: add_soft(model.Add(sum(B[s_idx, d, s_type] for d in range(TARGET_DAYS)) == 0), 20, f"【条件違反】{desc}")
         else: add_soft(model.Add(sum(B[s_idx, d, s_type] for d in range(TARGET_DAYS)) <= max_c), 20, f"【条件違反】{desc}")
+
+    for s1, s2, desc in ng_pairs:
+        for d in range(TARGET_DAYS): model.Add(B[s1, d, S_IRI] + B[s2, d, S_IRI] <= 1)
 
     model.Minimize(sum(penalties))
     solver = cp_model.CpSolver()
@@ -820,7 +832,6 @@ if st.button(btn_label, type="primary", use_container_width=True):
             st.dataframe(styled_result, use_container_width=True, height=min(620, 65 + staffs * 35))
             
             output = io.BytesIO()
-            # ★保存処理：完成シフト表出力時にもプルダウンを追加
             with pd.ExcelWriter(output, engine='openpyxl') as writer:
                 styled_result.to_excel(writer, sheet_name='完成シフト表')
                 if not changes_df.empty:
