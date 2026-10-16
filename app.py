@@ -55,11 +55,7 @@ DEFAULT_Q_DAYS = [1, 3, 6, 7, 8, 13, 14, 15, 17, 20, 22, 24, 27, 28, 29]
 def get_default_staff_df():
     data = []
     for name in DEFAULT_STAFF_NAMES:
-        data.append({
-            "スタッフ名": name, "早の上限": "制限なし", "Qの上限": "制限なし", 
-            "遅の上限": "制限なし", "入の上限": "制限なし",
-            "属性1": "", "属性2": ""
-        })
+        data.append({"スタッフ名": name, "早の上限": "制限なし", "Qの上限": "制限なし", "遅の上限": "制限なし", "入の上限": "制限なし"})
     return pd.DataFrame(data)
 
 def get_default_ng_pairs_df():
@@ -627,7 +623,6 @@ def run_normal_mode():
         for s1, s2, _ in ng_pairs:
             for d in range(TARGET_DAYS): model.Add(B[s1, d, S_IRI] + B[s2, d, S_IRI] <= 1)
 
-        # ★追加：委員会・グループ配置のソフト制約
         for c_idx, (c_name, members, t_shifts, req_count) in enumerate(COMMITTEES):
             Z_days = []
             for d in range(TARGET_DAYS):
@@ -647,7 +642,6 @@ def run_normal_mode():
         for s in range(staffs): model.Add(iri_counts[s] == sum(B[s, d, S_IRI] for d in range(TARGET_DAYS)))
         max_iri = model.NewIntVar(0, TARGET_DAYS, 'max_iri')
         model.AddMaxEquality(max_iri, iri_counts)
-        
         model.Minimize(max_iri * 100 + sum(five_consec_penalty_terms) + sum(committee_penalties))
 
         solver = cp_model.CpSolver()
@@ -676,8 +670,8 @@ def run_normal_mode():
             
         res_df = format_result_df([[shift_str[next(t for t in range(10) if solver.Value(B[s, d, t]))] for d in range(TARGET_DAYS)] for s in range(staffs)])
         
-        # ★追加：委員会の最適日レポートの作成
         comm_records = []
+        rename_dict = {}
         for c_idx, (c_name, members, t_shifts, req_count) in enumerate(COMMITTEES):
             met_day = None
             attendees = []
@@ -695,11 +689,19 @@ def run_normal_mode():
                     break
             
             if met_day is not None:
-                comm_records.append({"委員会名": c_name, "実施日": day_labels[met_day], "参加対象者": "、".join(attendees)})
+                day_str = day_labels[met_day]
+                comm_records.append({"委員会名": c_name, "実施日": day_str, "参加対象者": "、".join(attendees)})
+                if day_str in rename_dict:
+                    rename_dict[day_str] = rename_dict[day_str] + f"・{c_name}"
+                else:
+                    rename_dict[day_str] = f"{day_str}\n★{c_name}"
             else:
                 comm_records.append({"委員会名": c_name, "実施日": "⚠️ 条件を満たす日がありません", "参加対象者": "-"})
         comm_res_df = pd.DataFrame(comm_records)
-        
+
+        # ★追加：シフト表の列タイトル（日付）に委員会名を上書き
+        res_df = res_df.rename(columns=rename_dict)
+
         return res_df, pd.DataFrame(), comm_res_df
     else:
         st.error("❌ 条件が厳しすぎます。原因調査モードへ移行します...")
@@ -718,6 +720,7 @@ def run_reschedule_mode():
         model = cp_model.CpModel()
         B = {(s, d, t): model.NewBoolVar(f'B_{s}_{d}_{t}') for s in range(staffs) for d in range(TARGET_DAYS) for t in range(10)}
         obj_terms = []
+        five_consec_penalty_terms = []
 
         is_modified = [model.NewBoolVar(f'is_mod_{s}') for s in range(staffs)]
 
@@ -781,7 +784,6 @@ def run_reschedule_mode():
                     model.AddImplication(B[s, d, S_OSO], B[s, d+1, S_HAYA].Not())
                     model.AddImplication(B[s, d, S_OSO], B[s, d+1, S_Q].Not())
 
-        five_consec_penalty_terms = []
         for s in range(staffs):
             prev_c = PREV_CONSECUTIVE.get(s, 0)
             C_vars = [model.NewIntVar(0, 100, f'C_{s}_{d}') for d in range(TARGET_DAYS)]
@@ -814,22 +816,6 @@ def run_reschedule_mode():
 
         for s1, s2, _ in ng_pairs:
             for d in range(LOCK_UNTIL_DAY, TARGET_DAYS): model.Add(B[s1, d, S_IRI] + B[s2, d, S_IRI] <= 1)
-
-        # ★追加：委員会・グループ配置のソフト制約
-        for c_idx, (c_name, members, t_shifts, req_count) in enumerate(COMMITTEES):
-            Z_days = []
-            for d in range(TARGET_DAYS):
-                Z_d = model.NewBoolVar(f'comm_{c_idx}_{d}')
-                model.Add(sum(B[s, d, t] for s in members for t in t_shifts) >= req_count).OnlyEnforceIf(Z_d)
-                Z_days.append(Z_d)
-            
-            met_any = model.NewBoolVar(f'comm_met_{c_idx}')
-            model.AddMaxEquality(met_any, Z_days)
-            viol = model.NewBoolVar(f'comm_viol_{c_idx}')
-            model.Add(met_any == 1).OnlyEnforceIf(viol.Not())
-            model.Add(met_any == 0).OnlyEnforceIf(viol)
-            
-            obj_terms.append(viol * 50000)
 
         model.Minimize(sum(obj_terms))
         solver = cp_model.CpSolver()
@@ -883,8 +869,8 @@ def run_reschedule_mode():
             else:
                 for ch in ui_changes: st.markdown(ch)
                 
-        # ★追加：委員会の最適日レポートの作成
         comm_records = []
+        rename_dict = {}
         for c_idx, (c_name, members, t_shifts, req_count) in enumerate(COMMITTEES):
             met_day = None
             attendees = []
@@ -902,10 +888,18 @@ def run_reschedule_mode():
                     break
             
             if met_day is not None:
-                comm_records.append({"委員会名": c_name, "実施日": day_labels[met_day], "参加対象者": "、".join(attendees)})
+                day_str = day_labels[met_day]
+                comm_records.append({"委員会名": c_name, "実施日": day_str, "参加対象者": "、".join(attendees)})
+                if day_str in rename_dict:
+                    rename_dict[day_str] = rename_dict[day_str] + f"・{c_name}"
+                else:
+                    rename_dict[day_str] = f"{day_str}\n★{c_name}"
             else:
                 comm_records.append({"委員会名": c_name, "実施日": "⚠️ 条件を満たす日がありません", "参加対象者": "-"})
         comm_res_df = pd.DataFrame(comm_records)
+
+        # ★追加：シフト表の列タイトル（日付）に委員会名を上書き
+        result_df = result_df.rename(columns=rename_dict)
 
         return result_df, changes_df, comm_res_df
     else:
@@ -996,23 +990,6 @@ def run_debug_mode():
     for s1, s2, desc in ng_pairs:
         for d in range(TARGET_DAYS): model.Add(B[s1, d, S_IRI] + B[s2, d, S_IRI] <= 1)
 
-    # ★追加：原因調査モードでも委員会配置の違反をチェック
-    for c_idx, (c_name, members, t_shifts, req_count) in enumerate(COMMITTEES):
-        Z_days = []
-        for d in range(TARGET_DAYS):
-            Z_d = model.NewBoolVar(f'comm_{c_idx}_{d}')
-            model.Add(sum(B[s, d, t] for s in members for t in t_shifts) >= req_count).OnlyEnforceIf(Z_d)
-            Z_days.append(Z_d)
-        
-        met_any = model.NewBoolVar(f'comm_met_{c_idx}')
-        model.AddMaxEquality(met_any, Z_days)
-        viol = model.NewBoolVar(f'comm_viol_{c_idx}')
-        model.Add(met_any == 1).OnlyEnforceIf(viol.Not())
-        model.Add(met_any == 0).OnlyEnforceIf(viol)
-        
-        penalties.append(viol * 50000)
-        violations_info.append((viol, f"【委員会配置エラー】「{c_name}」の条件を満たす日が1日も作れませんでした"))
-
     model.Minimize(sum(penalties))
     solver = cp_model.CpSolver()
     solver.parameters.num_search_workers = 8
@@ -1027,7 +1004,40 @@ def run_debug_mode():
             st.error(f"🚨 以下のルールが衝突しています（計 {len(broken_rules)} 件）：")
             for rule in broken_rules: st.write(f"・ {rule}")
         raw_table = [[shift_str[next(t for t in range(10) if solver.Value(B[s, d, t]))] for d in range(TARGET_DAYS)] for s in range(staffs)]
-        return format_result_df(raw_table), pd.DataFrame(), pd.DataFrame()
+        
+        # デバッグモードの列名リネーム（委員会があれば）
+        result_df = format_result_df(raw_table)
+        comm_records = []
+        rename_dict = {}
+        for c_idx, (c_name, members, t_shifts, req_count) in enumerate(COMMITTEES):
+            met_day = None
+            attendees = []
+            for d in range(TARGET_DAYS):
+                cnt = 0
+                att_names = []
+                for s in members:
+                    for t in t_shifts:
+                        if solver.Value(B[s, d, t]):
+                            cnt += 1
+                            att_names.append(f"{staff_names[s]}({shift_str[t]})")
+                if cnt >= req_count:
+                    met_day = d + 1
+                    attendees = att_names
+                    break
+            
+            if met_day is not None:
+                day_str = day_labels[met_day]
+                comm_records.append({"委員会名": c_name, "実施日": day_str, "参加対象者": "、".join(attendees)})
+                if day_str in rename_dict:
+                    rename_dict[day_str] = rename_dict[day_str] + f"・{c_name}"
+                else:
+                    rename_dict[day_str] = f"{day_str}\n★{c_name}"
+            else:
+                comm_records.append({"委員会名": c_name, "実施日": "⚠️ 条件を満たす日がありません", "参加対象者": "-"})
+        comm_res_df = pd.DataFrame(comm_records)
+        result_df = result_df.rename(columns=rename_dict)
+        
+        return result_df, pd.DataFrame(), comm_res_df
     else:
         st.error("指定自体が矛盾しています。")
         return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
@@ -1046,7 +1056,6 @@ if st.button(btn_label, type="primary", use_container_width=True):
             
         if not result_df.empty:
             
-            # ★追加：委員会の日程結果を画面に表示
             if not comm_res_df.empty:
                 st.markdown("### 📋 AIが決定した委員会・グループ日程")
                 st.table(comm_res_df)
@@ -1058,11 +1067,8 @@ if st.button(btn_label, type="primary", use_container_width=True):
             output = io.BytesIO()
             with pd.ExcelWriter(output, engine='openpyxl') as writer:
                 styled_result.to_excel(writer, sheet_name='完成シフト表')
-                
-                # ★追加：委員会の日程結果をExcelに出力
                 if not comm_res_df.empty:
                     comm_res_df.to_excel(writer, sheet_name='委員会日程表', index=False)
-                    
                 if not changes_df.empty:
                     changes_df.to_excel(writer, sheet_name='変更依頼リスト', index=False)
                 settings_df.to_excel(writer, sheet_name='基本設定', index=False)
