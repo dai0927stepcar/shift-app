@@ -354,6 +354,7 @@ settings_df = pd.DataFrame([
 save_req_df = edited_req_df.copy()
 save_req_df.columns = [PREV_COL] + [day_labels[int(c)] for c in day_cols]
 save_output = io.BytesIO()
+
 with pd.ExcelWriter(save_output, engine='openpyxl') as writer:
     settings_df.to_excel(writer, sheet_name='基本設定', index=False)
     edited_staff_df.to_excel(writer, sheet_name='スタッフ設定', index=False)
@@ -361,6 +362,7 @@ with pd.ExcelWriter(save_output, engine='openpyxl') as writer:
     edited_personal_lock_df.to_excel(writer, sheet_name='個別期間ロック設定', index=False)
     save_req_df.to_excel(writer, sheet_name='希望休入力')
     apply_excel_dropdowns(writer, staffs, TARGET_DAYS)
+
 save_excel_bytes = save_output.getvalue()
 
 col_save1, col_save2 = st.columns([1, 1])
@@ -474,7 +476,6 @@ def style_shift_df(df):
     try: return df.style.map(color_cell)
     except AttributeError: return df.style.applymap(color_cell)
 
-# ★修正ポイント1：すべてのモードで不足枠数を計算し表示。通常作成以外はエラーで止めずに警告として通す。
 def check_shortage():
     if staffs < 10:
         st.error(f"❌ 現在のスタッフ数（{staffs}人）では、1日に必要な勤務枠を満たせません。")
@@ -511,7 +512,8 @@ def run_normal_mode():
     personal_limits = get_personal_limits()
     ng_pairs = get_ng_pairs()
     
-    def attempt_fast_solve(consecutive_limit, strict_rank):
+    # ★修正ポイント：基本4連勤、緩和で最大5連勤となるよう、分かりやすい変数名（max_consec）に変更
+    def attempt_fast_solve(max_consec, strict_rank):
         model = cp_model.CpModel()
         B = {(s, d, t): model.NewBoolVar(f'B_{s}_{d}_{t}') for s in range(staffs) for d in range(TARGET_DAYS) for t in range(10)}
 
@@ -519,9 +521,11 @@ def run_normal_mode():
             for d in range(TARGET_DAYS):
                 model.AddExactlyOne([B[s, d, t] for t in range(10)])
                 req_shift = SPECIFIC_SHIFTS.get((s, d+1))
+                
                 if req_shift != S_YUKU: model.Add(B[s, d, S_YUKU] == 0)
                 if req_shift != S_KEN:  model.Add(B[s, d, S_KEN] == 0)
                 if req_shift != S_OJT:  model.Add(B[s, d, S_OJT] == 0)
+                
                 if req_shift is not None: model.Add(B[s, d, req_shift] == 1)
             model.Add(sum(B[s, d, S_YASU] for d in range(TARGET_DAYS)) == TARGET_YASU)
 
@@ -546,10 +550,10 @@ def run_normal_mode():
         for s in range(staffs):
             prev_c = PREV_CONSECUTIVE.get(s, 0)
             if prev_c > 0:
-                rem_days = max(1, consecutive_limit - prev_c)
+                rem_days = max(1, max_consec + 1 - prev_c)
                 if rem_days <= TARGET_DAYS: model.Add(sum(B[s, k, S_YASU] + B[s, k, S_YUKU] for k in range(rem_days)) >= 1)
-            for d in range(TARGET_DAYS - consecutive_limit + 1):
-                model.Add(sum(B[s, d+k, S_YASU] + B[s, d+k, S_YUKU] for k in range(consecutive_limit)) >= 1)
+            for d in range(TARGET_DAYS - max_consec):
+                model.Add(sum(B[s, d+k, S_YASU] + B[s, d+k, S_YUKU] for k in range(max_consec + 1)) >= 1)
 
         for s_idx, s_type, max_c, _ in personal_limits:
             if max_c == 0: model.Add(sum(B[s_idx, d, s_type] for d in range(TARGET_DAYS)) == 0)
@@ -567,13 +571,13 @@ def run_normal_mode():
         solver = cp_model.CpSolver()
         solver.parameters.num_search_workers = 8
         solver.parameters.max_time_in_seconds = 15.0
-        return solver.Solve(model), solver, B, consecutive_limit, strict_rank
+        return solver.Solve(model), solver, B, max_consec, strict_rank
 
-    with st.spinner("高速計算中...（ステップ1）"): status, solver, B, used_limit, used_strict = attempt_fast_solve(5, True)
+    with st.spinner("高速計算中...（基本4連勤ルール）"): status, solver, B, used_limit, used_strict = attempt_fast_solve(4, True)
     if status not in [cp_model.OPTIMAL, cp_model.FEASIBLE]:
-        with st.spinner("高速再計算中...（ステップ2）"): status, solver, B, used_limit, used_strict = attempt_fast_solve(6, True)
+        with st.spinner("高速再計算中...（緩和5連勤ルール）"): status, solver, B, used_limit, used_strict = attempt_fast_solve(5, True)
     if status not in [cp_model.OPTIMAL, cp_model.FEASIBLE]:
-        with st.spinner("高速再計算中...（ステップ3）"): status, solver, B, used_limit, used_strict = attempt_fast_solve(6, False)
+        with st.spinner("高速再計算中...（緩和5連勤・順序フリー）"): status, solver, B, used_limit, used_strict = attempt_fast_solve(5, False)
 
     if status in [cp_model.OPTIMAL, cp_model.FEASIBLE]:
         st.success("✅ シフト作成完了！")
@@ -592,15 +596,12 @@ def run_reschedule_mode():
     ng_pairs = get_ng_pairs()
     start_check_d = max(0, LOCK_UNTIL_DAY - 1)
 
-    def attempt_reschedule(consecutive_limit, strict_rank):
+    def attempt_reschedule(max_consec, strict_rank):
         model = cp_model.CpModel()
         B = {(s, d, t): model.NewBoolVar(f'B_{s}_{d}_{t}') for s in range(staffs) for d in range(TARGET_DAYS) for t in range(10)}
         obj_terms = []
 
-        is_modified = [model.NewBoolVar(f'is_mod_{s}') for s in range(staffs)]
-
         for s in range(staffs):
-            # ★修正ポイント2：休の不足分を変数化し、最大のペナルティ（100,000）で許容（休日出勤）
             yasu_sum = sum(B[s, d, S_YASU] for d in range(TARGET_DAYS))
             shortage_y = model.NewIntVar(0, TARGET_DAYS, f'shortage_y_{s}')
             model.Add(yasu_sum + shortage_y == TARGET_YASU)
@@ -628,8 +629,6 @@ def run_reschedule_mode():
                         obj_terms.append(B[s, d, S_YASU] * 1)
                     elif req_shift is not None:
                         model.Add(B[s, d, req_shift] == 1)
-                        if orig_t is not None and req_shift != orig_t:
-                            model.Add(is_modified[s] == 1)
 
                     if orig_t is not None:
                         if req_shift == S_YUKU and orig_t == S_YUKU:
@@ -637,12 +636,11 @@ def run_reschedule_mode():
                         elif req_shift is None:
                             if orig_t in [S_OJT, S_FREE]:
                                 obj_terms.append((1 - B[s, d, orig_t]) * 5)
-                            elif orig_t in [S_IRI, S_AKE]:
-                                obj_terms.append((1 - B[s, d, orig_t]) * 20)
-                            elif orig_t == S_YASU:
-                                obj_terms.append((1 - B[s, d, S_YASU]) * 30)
                             else:
-                                obj_terms.append((1 - B[s, d, orig_t]) * 10)
+                                if orig_t == S_YASU:
+                                    obj_terms.append((1 - B[s, d, S_YASU]) * 30)
+                                else:
+                                    obj_terms.append((1 - B[s, d, orig_t]) * 10)
 
         for d in range(LOCK_UNTIL_DAY, TARGET_DAYS):
             model.Add(sum(B[s, d, S_HAYA] for s in range(staffs)) == 3)
@@ -666,11 +664,11 @@ def run_reschedule_mode():
             if LOCK_UNTIL_DAY == 0:
                 prev_c = PREV_CONSECUTIVE.get(s, 0)
                 if prev_c > 0:
-                    rem_days = max(1, consecutive_limit - prev_c)
+                    rem_days = max(1, max_consec + 1 - prev_c)
                     if rem_days <= TARGET_DAYS: model.Add(sum(B[s, k, S_YASU] + B[s, k, S_YUKU] for k in range(rem_days)) >= 1)
-            for d in range(TARGET_DAYS - consecutive_limit + 1):
-                if d + consecutive_limit - 1 >= LOCK_UNTIL_DAY:
-                    model.Add(sum(B[s, d+k, S_YASU] + B[s, d+k, S_YUKU] for k in range(consecutive_limit)) >= 1)
+            for d in range(TARGET_DAYS - max_consec):
+                if d + max_consec >= LOCK_UNTIL_DAY:
+                    model.Add(sum(B[s, d+k, S_YASU] + B[s, d+k, S_YUKU] for k in range(max_consec + 1)) >= 1)
 
         for s_idx, s_type, max_c, _ in personal_limits:
             locked_cnt = sum(1 for d in range(1, LOCK_UNTIL_DAY + 1) if SPECIFIC_SHIFTS.get((s_idx, d)) == s_type)
@@ -685,10 +683,12 @@ def run_reschedule_mode():
         solver = cp_model.CpSolver()
         solver.parameters.num_search_workers = 8
         solver.parameters.max_time_in_seconds = 15.0
-        return solver.Solve(model), solver, B, consecutive_limit, strict_rank
+        return solver.Solve(model), solver, B, max_consec, strict_rank
 
     steps = [
-        (5, True, "ステップ1"), (6, True, "ステップ2"), (6, False, "ステップ3")
+        (4, True, "ステップ1（基本4連勤ルール）"), 
+        (5, True, "ステップ2（緩和5連勤ルール）"), 
+        (5, False, "ステップ3（緩和5連勤・順序フリー）")
     ]
     for c_lim, s_rank, label in steps:
         with st.spinner(f"最小変更で再計算中...（{label}）"):
@@ -762,7 +762,6 @@ def run_debug_mode():
                 
             if req_shift is not None: model.Add(B[s, d, req_shift] == 1)
 
-    # ★修正ポイント3：デバッグモードでも休数エラーを最大のペナルティ（100,000）で計算し、エラーとしつつも出力を強行する
     for s in range(staffs): add_soft(model.Add(sum(B[s, d, S_YASU] for d in range(TARGET_DAYS)) == TARGET_YASU), 100000, f"【休数エラー】{staff_names[s]}さんの休が{TARGET_YASU}回ではありません")
 
     for d in range(TARGET_DAYS):
@@ -785,9 +784,9 @@ def run_debug_mode():
     for s in range(staffs):
         prev_c = PREV_CONSECUTIVE.get(s, 0)
         if prev_c > 0:
-            rem_days = max(1, 5 - prev_c)
-            if rem_days <= TARGET_DAYS: add_soft(model.Add(sum(B[s, k, S_YASU] + B[s, k, S_YUKU] for k in range(rem_days)) >= 1), 15, f"【月初連勤超過】{staff_names[s]}さんが{rem_days}日以内に休/有給なし")
-        for d in range(TARGET_DAYS - 4): add_soft(model.Add(sum(B[s, d+k, S_YASU] + B[s, d+k, S_YUKU] for k in range(5)) >= 1), 5, f"【連勤超過】{staff_names[s]}さんが{day_labels[d+1]}から連続オーバー")
+            rem_days = max(1, 4 + 1 - prev_c)
+            if rem_days <= TARGET_DAYS: add_soft(model.Add(sum(B[s, k, S_YASU] + B[s, k, S_YUKU] for k in range(rem_days)) >= 1), 15, f"【月初連勤超過】{staff_names[s]}さんが{rem_days}日以内に休/有給なし（基本4連勤ルール違反）")
+        for d in range(TARGET_DAYS - 4): add_soft(model.Add(sum(B[s, d+k, S_YASU] + B[s, d+k, S_YUKU] for k in range(5)) >= 1), 5, f"【連勤超過】{staff_names[s]}さんが{day_labels[d+1]}から5連勤以上している（基本4連勤ルール違反）")
 
     for s_idx, s_type, max_c, desc in personal_limits:
         if max_c == 0: add_soft(model.Add(sum(B[s_idx, d, s_type] for d in range(TARGET_DAYS)) == 0), 20, f"【条件違反】{desc}")
