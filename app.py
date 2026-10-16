@@ -691,10 +691,11 @@ def run_normal_mode():
             if met_day is not None:
                 day_str = day_labels[met_day]
                 comm_records.append({"委員会名": c_name, "実施日": day_str, "参加対象者": "、".join(attendees)})
+                # ★修正箇所：改行 \n をやめてスペースに変更し、確実に1行で表示されるようにしました
                 if day_str in rename_dict:
                     rename_dict[day_str] = rename_dict[day_str] + f"・{c_name}"
                 else:
-                    rename_dict[day_str] = f"{day_str}\n★{c_name}"
+                    rename_dict[day_str] = f"{day_str} ★{c_name}"
             else:
                 comm_records.append({"委員会名": c_name, "実施日": "⚠️ 条件を満たす日がありません", "参加対象者": "-"})
         comm_res_df = pd.DataFrame(comm_records)
@@ -817,6 +818,21 @@ def run_reschedule_mode():
         for s1, s2, _ in ng_pairs:
             for d in range(LOCK_UNTIL_DAY, TARGET_DAYS): model.Add(B[s1, d, S_IRI] + B[s2, d, S_IRI] <= 1)
 
+        for c_idx, (c_name, members, t_shifts, req_count) in enumerate(COMMITTEES):
+            Z_days = []
+            for d in range(TARGET_DAYS):
+                Z_d = model.NewBoolVar(f'comm_{c_idx}_{d}')
+                model.Add(sum(B[s, d, t] for s in members for t in t_shifts) >= req_count).OnlyEnforceIf(Z_d)
+                Z_days.append(Z_d)
+            
+            met_any = model.NewBoolVar(f'comm_met_{c_idx}')
+            model.AddMaxEquality(met_any, Z_days)
+            viol = model.NewBoolVar(f'comm_viol_{c_idx}')
+            model.Add(met_any == 1).OnlyEnforceIf(viol.Not())
+            model.Add(met_any == 0).OnlyEnforceIf(viol)
+            
+            obj_terms.append(viol * 50000)
+
         model.Minimize(sum(obj_terms))
         solver = cp_model.CpSolver()
         solver.parameters.num_search_workers = 8
@@ -890,10 +906,11 @@ def run_reschedule_mode():
             if met_day is not None:
                 day_str = day_labels[met_day]
                 comm_records.append({"委員会名": c_name, "実施日": day_str, "参加対象者": "、".join(attendees)})
+                # ★修正箇所：改行 \n をやめてスペースに変更し、確実に1行で表示されるようにしました
                 if day_str in rename_dict:
                     rename_dict[day_str] = rename_dict[day_str] + f"・{c_name}"
                 else:
-                    rename_dict[day_str] = f"{day_str}\n★{c_name}"
+                    rename_dict[day_str] = f"{day_str} ★{c_name}"
             else:
                 comm_records.append({"委員会名": c_name, "実施日": "⚠️ 条件を満たす日がありません", "参加対象者": "-"})
         comm_res_df = pd.DataFrame(comm_records)
@@ -990,6 +1007,22 @@ def run_debug_mode():
     for s1, s2, desc in ng_pairs:
         for d in range(TARGET_DAYS): model.Add(B[s1, d, S_IRI] + B[s2, d, S_IRI] <= 1)
 
+    for c_idx, (c_name, members, t_shifts, req_count) in enumerate(COMMITTEES):
+        Z_days = []
+        for d in range(TARGET_DAYS):
+            Z_d = model.NewBoolVar(f'comm_{c_idx}_{d}')
+            model.Add(sum(B[s, d, t] for s in members for t in t_shifts) >= req_count).OnlyEnforceIf(Z_d)
+            Z_days.append(Z_d)
+        
+        met_any = model.NewBoolVar(f'comm_met_{c_idx}')
+        model.AddMaxEquality(met_any, Z_days)
+        viol = model.NewBoolVar(f'comm_viol_{c_idx}')
+        model.Add(met_any == 1).OnlyEnforceIf(viol.Not())
+        model.Add(met_any == 0).OnlyEnforceIf(viol)
+        
+        penalties.append(viol * 50000)
+        violations_info.append((viol, f"【委員会配置エラー】「{c_name}」の条件を満たす日が1日も作れませんでした"))
+
     model.Minimize(sum(penalties))
     solver = cp_model.CpSolver()
     solver.parameters.num_search_workers = 8
@@ -1005,7 +1038,6 @@ def run_debug_mode():
             for rule in broken_rules: st.write(f"・ {rule}")
         raw_table = [[shift_str[next(t for t in range(10) if solver.Value(B[s, d, t]))] for d in range(TARGET_DAYS)] for s in range(staffs)]
         
-        # デバッグモードの列名リネーム（委員会があれば）
         result_df = format_result_df(raw_table)
         comm_records = []
         rename_dict = {}
@@ -1028,10 +1060,11 @@ def run_debug_mode():
             if met_day is not None:
                 day_str = day_labels[met_day]
                 comm_records.append({"委員会名": c_name, "実施日": day_str, "参加対象者": "、".join(attendees)})
+                # ★修正箇所：改行 \n をやめてスペースに変更
                 if day_str in rename_dict:
                     rename_dict[day_str] = rename_dict[day_str] + f"・{c_name}"
                 else:
-                    rename_dict[day_str] = f"{day_str}\n★{c_name}"
+                    rename_dict[day_str] = f"{day_str} ★{c_name}"
             else:
                 comm_records.append({"委員会名": c_name, "実施日": "⚠️ 条件を満たす日がありません", "参加対象者": "-"})
         comm_res_df = pd.DataFrame(comm_records)
@@ -1062,7 +1095,8 @@ if st.button(btn_label, type="primary", use_container_width=True):
                 st.divider()
 
             styled_result = style_shift_df(result_df)
-            st.dataframe(styled_result, use_container_width=True, height=min(620, 65 + staffs * 35))
+            # ★修正箇所：列の横幅に余裕を持たせて、文字が隠れないように変更
+            st.dataframe(styled_result, use_container_width=False, width=2000, height=min(620, 65 + staffs * 35))
             
             output = io.BytesIO()
             with pd.ExcelWriter(output, engine='openpyxl') as writer:
