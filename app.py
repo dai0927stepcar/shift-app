@@ -452,7 +452,7 @@ def get_ng_pairs():
             pair_key = tuple(sorted((idx1, idx2)))
             if pair_key not in seen:
                 seen.add(pair_key)
-                pairs.append((idx1, idx2, f"{n1} পুনরায়さんと{n2}さんの同日「入」禁止"))
+                pairs.append((idx1, idx2, f"{n1}さんと{n2}さんの同日「入」禁止"))
     return pairs
 
 def format_result_df(raw_table_data):
@@ -544,13 +544,29 @@ def run_normal_mode():
                     model.AddImplication(B[s, d, S_OSO], B[s, d+1, S_HAYA].Not())
                     model.AddImplication(B[s, d, S_OSO], B[s, d+1, S_Q].Not())
 
+        # ★追加：5連勤の発生をカウントして極力減らすためのロジック
+        five_consec_penalty_terms = []
         for s in range(staffs):
             prev_c = PREV_CONSECUTIVE.get(s, 0)
+            
+            # 1. 5連勤以上のハード制約
             if prev_c > 0:
                 rem_days = max(1, max_consec + 1 - prev_c)
                 if rem_days <= TARGET_DAYS: model.Add(sum(B[s, k, S_YASU] + B[s, k, S_YUKU] for k in range(rem_days)) >= 1)
             for d in range(TARGET_DAYS - max_consec):
                 model.Add(sum(B[s, d+k, S_YASU] + B[s, d+k, S_YUKU] for k in range(max_consec + 1)) >= 1)
+
+            # 2. 【緩和時のみ機能】5連勤が発生したら罰点をつけるためのソフト制約変数
+            if prev_c > 0:
+                rem_days_5 = 5 - prev_c
+                if 0 < rem_days_5 <= TARGET_DAYS:
+                    is_5_consec_init = model.NewBoolVar(f'5consec_init_{s}')
+                    model.Add(sum(B[s, k, S_YASU] + B[s, k, S_YUKU] for k in range(rem_days_5)) + is_5_consec_init >= 1)
+                    five_consec_penalty_terms.append(is_5_consec_init)
+            for d in range(TARGET_DAYS - 4):
+                is_5_consec = model.NewBoolVar(f'5consec_{s}_{d}')
+                model.Add(sum(B[s, d+k, S_YASU] + B[s, d+k, S_YUKU] for k in range(5)) + is_5_consec >= 1)
+                five_consec_penalty_terms.append(is_5_consec)
 
         for s_idx, s_type, max_c, _ in personal_limits:
             if max_c == 0: model.Add(sum(B[s_idx, d, s_type] for d in range(TARGET_DAYS)) == 0)
@@ -563,7 +579,9 @@ def run_normal_mode():
         for s in range(staffs): model.Add(iri_counts[s] == sum(B[s, d, S_IRI] for d in range(TARGET_DAYS)))
         max_iri = model.NewIntVar(0, TARGET_DAYS, 'max_iri')
         model.AddMaxEquality(max_iri, iri_counts)
-        model.Minimize(max_iri)
+        
+        # ★修正：夜勤平準化（最優先）と、5連勤最小化（副次）を組み合わせて最小化
+        model.Minimize(max_iri * 100 + sum(five_consec_penalty_terms))
 
         solver = cp_model.CpSolver()
         solver.parameters.num_search_workers = 8
@@ -584,7 +602,6 @@ def run_normal_mode():
             used_step = "緩和5連勤・順序フリー"
 
     if status in [cp_model.OPTIMAL, cp_model.FEASIBLE]:
-        # ★修正ポイント：計算終了後も「どのルールで組めたか」を永久表示する
         if used_limit == 4 and used_strict:
             st.success("✅ シフト作成完了！（基本4連勤ルールで成功しました）")
         else:
@@ -611,6 +628,25 @@ def run_reschedule_mode():
         obj_terms = []
 
         is_modified = [model.NewBoolVar(f'is_mod_{s}') for s in range(staffs)]
+
+        # ★追加：5連勤の発生をカウントして罰点（コスト50）を与えるロジック
+        five_consec_penalty_terms = []
+        for s in range(staffs):
+            prev_c = PREV_CONSECUTIVE.get(s, 0)
+            if prev_c > 0:
+                rem_days_5 = 5 - prev_c
+                if 0 < rem_days_5 <= TARGET_DAYS:
+                    is_5_consec_init = model.NewBoolVar(f'5consec_init_{s}')
+                    model.Add(sum(B[s, k, S_YASU] + B[s, k, S_YUKU] for k in range(rem_days_5)) + is_5_consec_init >= 1)
+                    five_consec_penalty_terms.append(is_5_consec_init)
+            
+            for d in range(TARGET_DAYS - 4):
+                is_5_consec = model.NewBoolVar(f'5consec_{s}_{d}')
+                model.Add(sum(B[s, d+k, S_YASU] + B[s, d+k, S_YUKU] for k in range(5)) + is_5_consec >= 1)
+                five_consec_penalty_terms.append(is_5_consec)
+                
+        for term in five_consec_penalty_terms:
+            obj_terms.append(term * 50)
 
         for s in range(staffs):
             yasu_sum = sum(B[s, d, S_YASU] for d in range(TARGET_DAYS))
@@ -733,7 +769,6 @@ def run_reschedule_mode():
 
         changes_df = pd.DataFrame(change_records)
         
-        # ★修正ポイント：計算終了後も「どのルールで組めたか」を永久表示する
         if used_limit == 4 and used_strict:
             st.success(f"✅ 最小変更でのシフト再作成が完了しました！（総変更：{len(ui_changes)} 箇所）")
         else:
