@@ -400,7 +400,6 @@ for s_idx, s_name in enumerate(staff_names):
             if val_str in str_to_shift: SPECIFIC_SHIFTS[(s_idx, d)] = str_to_shift[val_str]
         else:
             if val_str in str_to_shift:
-                # ★修正ポイント：「休」や「フリー」は絶対固定のリストから外し、AIが動かせるようにする
                 if d <= LOCK_UNTIL_DAY: SPECIFIC_SHIFTS[(s_idx, d)] = str_to_shift[val_str]
                 elif is_personal_locked: SPECIFIC_SHIFTS[(s_idx, d)] = str_to_shift[val_str]
                 elif orig_str != "" and val_str != orig_str: SPECIFIC_SHIFTS[(s_idx, d)] = str_to_shift[val_str]
@@ -486,10 +485,11 @@ def run_normal_mode():
             for d in range(TARGET_DAYS):
                 model.AddExactlyOne([B[s, d, t] for t in range(10)])
                 req_shift = SPECIFIC_SHIFTS.get((s, d+1))
+                
                 if req_shift != S_YUKU: model.Add(B[s, d, S_YUKU] == 0)
                 if req_shift != S_KEN:  model.Add(B[s, d, S_KEN] == 0)
-                if req_shift != S_FREE: model.Add(B[s, d, S_FREE] == 0)
                 if req_shift != S_OJT:  model.Add(B[s, d, S_OJT] == 0)
+                
                 if req_shift is not None: model.Add(B[s, d, req_shift] == 1)
             model.Add(sum(B[s, d, S_YASU] for d in range(TARGET_DAYS)) == TARGET_YASU)
 
@@ -581,7 +581,6 @@ def run_reschedule_mode():
 
                 if req_shift != S_YUKU and orig_t != S_YUKU: model.Add(B[s, d, S_YUKU] == 0)
                 if req_shift != S_KEN and orig_t != S_KEN:  model.Add(B[s, d, S_KEN] == 0)
-                if req_shift != S_FREE and orig_t != S_FREE: model.Add(B[s, d, S_FREE] == 0)
                 if req_shift != S_OJT and orig_t != S_OJT: model.Add(B[s, d, S_OJT] == 0)
 
                 if (d + 1) <= LOCK_UNTIL_DAY or is_p_locked:
@@ -604,11 +603,17 @@ def run_reschedule_mode():
                         elif req_shift is None:
                             if orig_t in [S_OJT, S_FREE]:
                                 obj_terms.append((1 - B[s, d, orig_t]) * 5)
+                            elif orig_t in [S_IRI, S_AKE]:
+                                # ★3-3 修正：入、明の変更コストを20に変更
+                                obj_terms.append((1 - B[s, d, orig_t]) * 20)
+                                model.AddImplication(B[s, d, orig_t].Not(), is_modified[s])
+                            elif orig_t == S_YASU:
+                                # ★3-3 修正：休の変更コストを30に変更
+                                obj_terms.append((1 - B[s, d, S_YASU]) * 30)
+                                model.AddImplication(B[s, d, S_YASU].Not(), is_modified[s])
                             else:
-                                if orig_t == S_YASU:
-                                    obj_terms.append((1 - B[s, d, S_YASU]) * 20)
-                                else:
-                                    obj_terms.append((1 - B[s, d, orig_t]) * 10)
+                                # 早、遅、Qなどの変更コストは10
+                                obj_terms.append((1 - B[s, d, orig_t]) * 10)
                                 model.AddImplication(B[s, d, orig_t].Not(), is_modified[s])
 
         for d in range(LOCK_UNTIL_DAY, TARGET_DAYS):
@@ -721,12 +726,10 @@ def run_debug_mode():
             if "欠勤フォロー" not in mode:
                 if req_shift != S_YUKU: model.Add(B[s, d, S_YUKU] == 0)
                 if req_shift != S_KEN:  model.Add(B[s, d, S_KEN] == 0)
-                if req_shift != S_FREE: model.Add(B[s, d, S_FREE] == 0)
                 if req_shift != S_OJT:  model.Add(B[s, d, S_OJT] == 0)
             else:
                 if req_shift != S_YUKU and orig_t != S_YUKU: model.Add(B[s, d, S_YUKU] == 0)
                 if req_shift != S_KEN and orig_t != S_KEN:  model.Add(B[s, d, S_KEN] == 0)
-                if req_shift != S_FREE and orig_t != S_FREE: model.Add(B[s, d, S_FREE] == 0)
                 if req_shift != S_OJT and orig_t != S_OJT: model.Add(B[s, d, S_OJT] == 0)
                 
             if req_shift is not None: model.Add(B[s, d, req_shift] == 1)
@@ -761,8 +764,9 @@ def run_debug_mode():
         if max_c == 0: add_soft(model.Add(sum(B[s_idx, d, s_type] for d in range(TARGET_DAYS)) == 0), 20, f"【条件違反】{desc}")
         else: add_soft(model.Add(sum(B[s_idx, d, s_type] for d in range(TARGET_DAYS)) <= max_c), 20, f"【条件違反】{desc}")
 
+    # ★4-2 修正：NGペアをソフト制約（add_soft）から絶対ルール（model.Add）へ格上げしました
     for s1, s2, desc in ng_pairs:
-        for d in range(TARGET_DAYS): add_soft(model.Add(B[s1, d, S_IRI] + B[s2, d, S_IRI] <= 1), 25, f"【NGペア違反】{day_labels[d+1]}: {desc}")
+        for d in range(TARGET_DAYS): model.Add(B[s1, d, S_IRI] + B[s2, d, S_IRI] <= 1)
 
     model.Minimize(sum(penalties))
     solver = cp_model.CpSolver()
