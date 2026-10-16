@@ -452,7 +452,7 @@ def get_ng_pairs():
             pair_key = tuple(sorted((idx1, idx2)))
             if pair_key not in seen:
                 seen.add(pair_key)
-                pairs.append((idx1, idx2, f"{n1}さんと{n2}さんの同日「入」禁止"))
+                pairs.append((idx1, idx2, f"{n1} পুনরায়さんと{n2}さんの同日「入」禁止"))
     return pairs
 
 def format_result_df(raw_table_data):
@@ -512,7 +512,6 @@ def run_normal_mode():
     personal_limits = get_personal_limits()
     ng_pairs = get_ng_pairs()
     
-    # ★修正ポイント：基本4連勤、緩和で最大5連勤となるよう、分かりやすい変数名（max_consec）に変更
     def attempt_fast_solve(max_consec, strict_rank):
         model = cp_model.CpModel()
         B = {(s, d, t): model.NewBoolVar(f'B_{s}_{d}_{t}') for s in range(staffs) for d in range(TARGET_DAYS) for t in range(10)}
@@ -521,11 +520,9 @@ def run_normal_mode():
             for d in range(TARGET_DAYS):
                 model.AddExactlyOne([B[s, d, t] for t in range(10)])
                 req_shift = SPECIFIC_SHIFTS.get((s, d+1))
-                
                 if req_shift != S_YUKU: model.Add(B[s, d, S_YUKU] == 0)
                 if req_shift != S_KEN:  model.Add(B[s, d, S_KEN] == 0)
                 if req_shift != S_OJT:  model.Add(B[s, d, S_OJT] == 0)
-                
                 if req_shift is not None: model.Add(B[s, d, req_shift] == 1)
             model.Add(sum(B[s, d, S_YASU] for d in range(TARGET_DAYS)) == TARGET_YASU)
 
@@ -573,14 +570,26 @@ def run_normal_mode():
         solver.parameters.max_time_in_seconds = 15.0
         return solver.Solve(model), solver, B, max_consec, strict_rank
 
-    with st.spinner("高速計算中...（基本4連勤ルール）"): status, solver, B, used_limit, used_strict = attempt_fast_solve(4, True)
+    used_step = ""
+    with st.spinner("高速計算中...（基本4連勤ルール）"): 
+        status, solver, B, used_limit, used_strict = attempt_fast_solve(4, True)
+        used_step = "基本4連勤ルール"
     if status not in [cp_model.OPTIMAL, cp_model.FEASIBLE]:
-        with st.spinner("高速再計算中...（緩和5連勤ルール）"): status, solver, B, used_limit, used_strict = attempt_fast_solve(5, True)
+        with st.spinner("高速再計算中...（緩和5連勤ルール）"): 
+            status, solver, B, used_limit, used_strict = attempt_fast_solve(5, True)
+            used_step = "緩和5連勤ルール"
     if status not in [cp_model.OPTIMAL, cp_model.FEASIBLE]:
-        with st.spinner("高速再計算中...（緩和5連勤・順序フリー）"): status, solver, B, used_limit, used_strict = attempt_fast_solve(5, False)
+        with st.spinner("高速再計算中...（緩和5連勤・順序フリー）"): 
+            status, solver, B, used_limit, used_strict = attempt_fast_solve(5, False)
+            used_step = "緩和5連勤・順序フリー"
 
     if status in [cp_model.OPTIMAL, cp_model.FEASIBLE]:
-        st.success("✅ シフト作成完了！")
+        # ★修正ポイント：計算終了後も「どのルールで組めたか」を永久表示する
+        if used_limit == 4 and used_strict:
+            st.success("✅ シフト作成完了！（基本4連勤ルールで成功しました）")
+        else:
+            st.warning(f"⚠️ 基本の4連勤ルールでは条件が厳しすぎたため、一部ルールを緩和（【{used_step}】を適用）して作成しました。")
+            
         res_df = format_result_df([[shift_str[next(t for t in range(10) if solver.Value(B[s, d, t]))] for d in range(TARGET_DAYS)] for s in range(staffs)])
         return res_df, pd.DataFrame()
     else:
@@ -600,6 +609,8 @@ def run_reschedule_mode():
         model = cp_model.CpModel()
         B = {(s, d, t): model.NewBoolVar(f'B_{s}_{d}_{t}') for s in range(staffs) for d in range(TARGET_DAYS) for t in range(10)}
         obj_terms = []
+
+        is_modified = [model.NewBoolVar(f'is_mod_{s}') for s in range(staffs)]
 
         for s in range(staffs):
             yasu_sum = sum(B[s, d, S_YASU] for d in range(TARGET_DAYS))
@@ -636,11 +647,12 @@ def run_reschedule_mode():
                         elif req_shift is None:
                             if orig_t in [S_OJT, S_FREE]:
                                 obj_terms.append((1 - B[s, d, orig_t]) * 5)
+                            elif orig_t in [S_IRI, S_AKE]:
+                                obj_terms.append((1 - B[s, d, orig_t]) * 20)
+                            elif orig_t == S_YASU:
+                                obj_terms.append((1 - B[s, d, S_YASU]) * 30)
                             else:
-                                if orig_t == S_YASU:
-                                    obj_terms.append((1 - B[s, d, S_YASU]) * 30)
-                                else:
-                                    obj_terms.append((1 - B[s, d, orig_t]) * 10)
+                                obj_terms.append((1 - B[s, d, orig_t]) * 10)
 
         for d in range(LOCK_UNTIL_DAY, TARGET_DAYS):
             model.Add(sum(B[s, d, S_HAYA] for s in range(staffs)) == 3)
@@ -686,14 +698,17 @@ def run_reschedule_mode():
         return solver.Solve(model), solver, B, max_consec, strict_rank
 
     steps = [
-        (4, True, "ステップ1（基本4連勤ルール）"), 
-        (5, True, "ステップ2（緩和5連勤ルール）"), 
-        (5, False, "ステップ3（緩和5連勤・順序フリー）")
+        (4, True, "基本4連勤ルール"), 
+        (5, True, "緩和5連勤ルール"), 
+        (5, False, "緩和5連勤・順序フリー")
     ]
+    used_step = ""
     for c_lim, s_rank, label in steps:
         with st.spinner(f"最小変更で再計算中...（{label}）"):
             status, solver, B, used_limit, used_strict = attempt_reschedule(c_lim, s_rank)
-        if status in [cp_model.OPTIMAL, cp_model.FEASIBLE]: break
+        if status in [cp_model.OPTIMAL, cp_model.FEASIBLE]: 
+            used_step = label
+            break
 
     if status in [cp_model.OPTIMAL, cp_model.FEASIBLE]:
         raw_table = [[shift_str[next(t for t in range(10) if solver.Value(B[s, d, t]))] for d in range(TARGET_DAYS)] for s in range(staffs)]
@@ -717,7 +732,13 @@ def run_reschedule_mode():
                     })
 
         changes_df = pd.DataFrame(change_records)
-        st.success(f"✅ 最小変更でのシフト再作成が完了しました！（総変更：{len(ui_changes)} 箇所）")
+        
+        # ★修正ポイント：計算終了後も「どのルールで組めたか」を永久表示する
+        if used_limit == 4 and used_strict:
+            st.success(f"✅ 最小変更でのシフト再作成が完了しました！（総変更：{len(ui_changes)} 箇所）")
+        else:
+            st.warning(f"⚠️ 基本の4連勤ルールでは組めなかったため、一部ルールを緩和（【{used_step}】を適用）して再作成しました。（総変更：{len(ui_changes)} 箇所）")
+            
         with st.expander(f"📝 元のシフト表から変更された箇所の一覧を見る（計 {len(ui_changes)} 箇所）", expanded=True):
             if not ui_changes: st.write("変更された箇所はありません。")
             else:
