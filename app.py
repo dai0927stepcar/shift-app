@@ -515,6 +515,7 @@ def run_normal_mode():
     def attempt_fast_solve(max_consec, strict_rank):
         model = cp_model.CpModel()
         B = {(s, d, t): model.NewBoolVar(f'B_{s}_{d}_{t}') for s in range(staffs) for d in range(TARGET_DAYS) for t in range(10)}
+        five_consec_penalty_terms = []
 
         for s in range(staffs):
             for d in range(TARGET_DAYS):
@@ -544,29 +545,26 @@ def run_normal_mode():
                     model.AddImplication(B[s, d, S_OSO], B[s, d+1, S_HAYA].Not())
                     model.AddImplication(B[s, d, S_OSO], B[s, d+1, S_Q].Not())
 
-        # ★追加：5連勤の発生をカウントして極力減らすためのロジック
-        five_consec_penalty_terms = []
         for s in range(staffs):
             prev_c = PREV_CONSECUTIVE.get(s, 0)
-            
-            # 1. 5連勤以上のハード制約
-            if prev_c > 0:
-                rem_days = max(1, max_consec + 1 - prev_c)
-                if rem_days <= TARGET_DAYS: model.Add(sum(B[s, k, S_YASU] + B[s, k, S_YUKU] for k in range(rem_days)) >= 1)
-            for d in range(TARGET_DAYS - max_consec):
-                model.Add(sum(B[s, d+k, S_YASU] + B[s, d+k, S_YUKU] for k in range(max_consec + 1)) >= 1)
-
-            # 2. 【緩和時のみ機能】5連勤が発生したら罰点をつけるためのソフト制約変数
-            if prev_c > 0:
-                rem_days_5 = 5 - prev_c
-                if 0 < rem_days_5 <= TARGET_DAYS:
-                    is_5_consec_init = model.NewBoolVar(f'5consec_init_{s}')
-                    model.Add(sum(B[s, k, S_YASU] + B[s, k, S_YUKU] for k in range(rem_days_5)) + is_5_consec_init >= 1)
-                    five_consec_penalty_terms.append(is_5_consec_init)
-            for d in range(TARGET_DAYS - 4):
-                is_5_consec = model.NewBoolVar(f'5consec_{s}_{d}')
-                model.Add(sum(B[s, d+k, S_YASU] + B[s, d+k, S_YUKU] for k in range(5)) + is_5_consec >= 1)
-                five_consec_penalty_terms.append(is_5_consec)
+            C_vars = [model.NewIntVar(0, 100, f'C_{s}_{d}') for d in range(TARGET_DAYS)]
+            for d in range(TARGET_DAYS):
+                yasu_flag = model.NewBoolVar(f'yasu_{s}_{d}')
+                model.Add(B[s, d, S_YASU] + B[s, d, S_YUKU] == 1).OnlyEnforceIf(yasu_flag)
+                model.Add(B[s, d, S_YASU] + B[s, d, S_YUKU] == 0).OnlyEnforceIf(yasu_flag.Not())
+                
+                prev_val = prev_c if d == 0 else C_vars[d-1]
+                w_expr = B[s, d, S_HAYA] + B[s, d, S_OSO] + B[s, d, S_Q] + B[s, d, S_KEN] + B[s, d, S_FREE] + B[s, d, S_OJT] + 2 * B[s, d, S_IRI]
+                
+                model.Add(C_vars[d] == 0).OnlyEnforceIf(yasu_flag)
+                model.Add(C_vars[d] == prev_val + w_expr).OnlyEnforceIf(yasu_flag.Not())
+                
+                model.Add(C_vars[d] <= max_consec)
+                
+                if max_consec == 5:
+                    diff = model.NewIntVar(0, 100, f'diff_5c_{s}_{d}')
+                    model.AddMaxEquality(diff, [0, C_vars[d] - 4])
+                    five_consec_penalty_terms.append(diff)
 
         for s_idx, s_type, max_c, _ in personal_limits:
             if max_c == 0: model.Add(sum(B[s_idx, d, s_type] for d in range(TARGET_DAYS)) == 0)
@@ -579,8 +577,6 @@ def run_normal_mode():
         for s in range(staffs): model.Add(iri_counts[s] == sum(B[s, d, S_IRI] for d in range(TARGET_DAYS)))
         max_iri = model.NewIntVar(0, TARGET_DAYS, 'max_iri')
         model.AddMaxEquality(max_iri, iri_counts)
-        
-        # ★修正：夜勤平準化（最優先）と、5連勤最小化（副次）を組み合わせて最小化
         model.Minimize(max_iri * 100 + sum(five_consec_penalty_terms))
 
         solver = cp_model.CpSolver()
@@ -626,27 +622,9 @@ def run_reschedule_mode():
         model = cp_model.CpModel()
         B = {(s, d, t): model.NewBoolVar(f'B_{s}_{d}_{t}') for s in range(staffs) for d in range(TARGET_DAYS) for t in range(10)}
         obj_terms = []
+        five_consec_penalty_terms = []
 
         is_modified = [model.NewBoolVar(f'is_mod_{s}') for s in range(staffs)]
-
-        # ★追加：5連勤の発生をカウントして罰点（コスト50）を与えるロジック
-        five_consec_penalty_terms = []
-        for s in range(staffs):
-            prev_c = PREV_CONSECUTIVE.get(s, 0)
-            if prev_c > 0:
-                rem_days_5 = 5 - prev_c
-                if 0 < rem_days_5 <= TARGET_DAYS:
-                    is_5_consec_init = model.NewBoolVar(f'5consec_init_{s}')
-                    model.Add(sum(B[s, k, S_YASU] + B[s, k, S_YUKU] for k in range(rem_days_5)) + is_5_consec_init >= 1)
-                    five_consec_penalty_terms.append(is_5_consec_init)
-            
-            for d in range(TARGET_DAYS - 4):
-                is_5_consec = model.NewBoolVar(f'5consec_{s}_{d}')
-                model.Add(sum(B[s, d+k, S_YASU] + B[s, d+k, S_YUKU] for k in range(5)) + is_5_consec >= 1)
-                five_consec_penalty_terms.append(is_5_consec)
-                
-        for term in five_consec_penalty_terms:
-            obj_terms.append(term * 50)
 
         for s in range(staffs):
             yasu_sum = sum(B[s, d, S_YASU] for d in range(TARGET_DAYS))
@@ -709,14 +687,28 @@ def run_reschedule_mode():
                     model.AddImplication(B[s, d, S_OSO], B[s, d+1, S_Q].Not())
 
         for s in range(staffs):
-            if LOCK_UNTIL_DAY == 0:
-                prev_c = PREV_CONSECUTIVE.get(s, 0)
-                if prev_c > 0:
-                    rem_days = max(1, max_consec + 1 - prev_c)
-                    if rem_days <= TARGET_DAYS: model.Add(sum(B[s, k, S_YASU] + B[s, k, S_YUKU] for k in range(rem_days)) >= 1)
-            for d in range(TARGET_DAYS - max_consec):
-                if d + max_consec >= LOCK_UNTIL_DAY:
-                    model.Add(sum(B[s, d+k, S_YASU] + B[s, d+k, S_YUKU] for k in range(max_consec + 1)) >= 1)
+            prev_c = PREV_CONSECUTIVE.get(s, 0)
+            C_vars = [model.NewIntVar(0, 100, f'C_{s}_{d}') for d in range(TARGET_DAYS)]
+            for d in range(TARGET_DAYS):
+                yasu_flag = model.NewBoolVar(f'yasu_{s}_{d}')
+                model.Add(B[s, d, S_YASU] + B[s, d, S_YUKU] == 1).OnlyEnforceIf(yasu_flag)
+                model.Add(B[s, d, S_YASU] + B[s, d, S_YUKU] == 0).OnlyEnforceIf(yasu_flag.Not())
+                
+                prev_val = prev_c if d == 0 else C_vars[d-1]
+                w_expr = B[s, d, S_HAYA] + B[s, d, S_OSO] + B[s, d, S_Q] + B[s, d, S_KEN] + B[s, d, S_FREE] + B[s, d, S_OJT] + 2 * B[s, d, S_IRI]
+                
+                model.Add(C_vars[d] == 0).OnlyEnforceIf(yasu_flag)
+                model.Add(C_vars[d] == prev_val + w_expr).OnlyEnforceIf(yasu_flag.Not())
+                
+                if d >= LOCK_UNTIL_DAY:
+                    model.Add(C_vars[d] <= max_consec)
+                
+                diff = model.NewIntVar(0, 100, f'diff_5c_{s}_{d}')
+                model.AddMaxEquality(diff, [0, C_vars[d] - 4])
+                five_consec_penalty_terms.append(diff)
+                
+        for term in five_consec_penalty_terms:
+            obj_terms.append(term * 50)
 
         for s_idx, s_type, max_c, _ in personal_limits:
             locked_cnt = sum(1 for d in range(1, LOCK_UNTIL_DAY + 1) if SPECIFIC_SHIFTS.get((s_idx, d)) == s_type)
@@ -839,10 +831,26 @@ def run_debug_mode():
 
     for s in range(staffs):
         prev_c = PREV_CONSECUTIVE.get(s, 0)
-        if prev_c > 0:
-            rem_days = max(1, 4 + 1 - prev_c)
-            if rem_days <= TARGET_DAYS: add_soft(model.Add(sum(B[s, k, S_YASU] + B[s, k, S_YUKU] for k in range(rem_days)) >= 1), 15, f"【月初連勤超過】{staff_names[s]}さんが{rem_days}日以内に休/有給なし（基本4連勤ルール違反）")
-        for d in range(TARGET_DAYS - 4): add_soft(model.Add(sum(B[s, d+k, S_YASU] + B[s, d+k, S_YUKU] for k in range(5)) >= 1), 5, f"【連勤超過】{staff_names[s]}さんが{day_labels[d+1]}から5連勤以上している（基本4連勤ルール違反）")
+        C_vars = [model.NewIntVar(0, 100, f'C_{s}_{d}') for d in range(TARGET_DAYS)]
+        for d in range(TARGET_DAYS):
+            yasu_flag = model.NewBoolVar(f'yasu_{s}_{d}')
+            model.Add(B[s, d, S_YASU] + B[s, d, S_YUKU] == 1).OnlyEnforceIf(yasu_flag)
+            model.Add(B[s, d, S_YASU] + B[s, d, S_YUKU] == 0).OnlyEnforceIf(yasu_flag.Not())
+            
+            prev_val = prev_c if d == 0 else C_vars[d-1]
+            w_expr = B[s, d, S_HAYA] + B[s, d, S_OSO] + B[s, d, S_Q] + B[s, d, S_KEN] + B[s, d, S_FREE] + B[s, d, S_OJT] + 2 * B[s, d, S_IRI]
+            
+            model.Add(C_vars[d] == 0).OnlyEnforceIf(yasu_flag)
+            model.Add(C_vars[d] == prev_val + w_expr).OnlyEnforceIf(yasu_flag.Not())
+            
+            viol = model.NewBoolVar(f'viol_{s}_{d}')
+            model.Add(C_vars[d] <= 4).OnlyEnforceIf(viol.Not())
+            model.Add(C_vars[d] > 4).OnlyEnforceIf(viol)
+            
+            weight = 15 if (prev_c > 0 and d < 5) else 5
+            penalties.append(viol * weight)
+            desc_prefix = "月初" if (prev_c > 0 and d < 5) else ""
+            violations_info.append((viol, f"【{desc_prefix}連勤超過】{staff_names[s]}さんが{day_labels[d+1]}時点で5連勤以上（基本4連勤ルール違反）"))
 
     for s_idx, s_type, max_c, desc in personal_limits:
         if max_c == 0: add_soft(model.Add(sum(B[s_idx, d, s_type] for d in range(TARGET_DAYS)) == 0), 20, f"【条件違反】{desc}")
