@@ -55,7 +55,11 @@ DEFAULT_Q_DAYS = [1, 3, 6, 7, 8, 13, 14, 15, 17, 20, 22, 24, 27, 28, 29]
 def get_default_staff_df():
     data = []
     for name in DEFAULT_STAFF_NAMES:
-        data.append({"スタッフ名": name, "早の上限": "制限なし", "Qの上限": "制限なし", "遅の上限": "制限なし", "入の上限": "制限なし"})
+        data.append({
+            "スタッフ名": name, "早の上限": "制限なし", "Qの上限": "制限なし", 
+            "遅の上限": "制限なし", "入の上限": "制限なし",
+            "属性1": "", "属性2": ""
+        })
     return pd.DataFrame(data)
 
 def get_default_ng_pairs_df():
@@ -63,6 +67,9 @@ def get_default_ng_pairs_df():
 
 def get_default_personal_lock_df():
     return pd.DataFrame({"スタッフ名": pd.Series(dtype="str"), "開始日": pd.Series(dtype="str"), "終了日": pd.Series(dtype="str")})
+
+def get_default_committee_df():
+    return pd.DataFrame({"委員会名": pd.Series(dtype="str"), "対象シフト（例: 遅,明）": pd.Series(dtype="str")})
 
 def extract_day_num(col_name):
     s = str(col_name).strip()
@@ -106,6 +113,7 @@ if "base_schedule_df" not in st.session_state: st.session_state.base_schedule_df
 if "staff_df" not in st.session_state: st.session_state.staff_df = get_default_staff_df()
 if "ng_pairs_df" not in st.session_state: st.session_state.ng_pairs_df = get_default_ng_pairs_df()
 if "personal_lock_df" not in st.session_state: st.session_state.personal_lock_df = get_default_personal_lock_df()
+if "committee_df" not in st.session_state: st.session_state.committee_df = get_default_committee_df()
 if "req_df" not in st.session_state:
     init_cols = [PREV_COL] + [str(i) for i in range(1, 32)]
     init_req = pd.DataFrame("", index=st.session_state.staff_df["スタッフ名"].tolist(), columns=init_cols)
@@ -177,7 +185,12 @@ def load_common_settings(xls):
             if q_raw == "" or q_raw.lower() == "nan" or q_raw == "なし": st.session_state.setting_q_days = []
             else: st.session_state.setting_q_days = [int(x.strip().split(".")[0]) for x in q_raw.split(",") if x.strip().split(".")[0].isdigit()]
     if "スタッフ設定" in xls.sheet_names:
-        st.session_state.staff_df = pd.read_excel(xls, "スタッフ設定").fillna("制限なし").astype(str)
+        loaded_staff = pd.read_excel(xls, "スタッフ設定").fillna("制限なし").astype(str)
+        if "属性1" not in loaded_staff.columns: loaded_staff["属性1"] = ""
+        if "属性2" not in loaded_staff.columns: loaded_staff["属性2"] = ""
+        loaded_staff["属性1"] = loaded_staff["属性1"].replace("制限なし", "")
+        loaded_staff["属性2"] = loaded_staff["属性2"].replace("制限なし", "")
+        st.session_state.staff_df = loaded_staff
     if "NGペア設定" in xls.sheet_names:
         loaded_ng = pd.read_excel(xls, "NGペア設定").fillna("").astype(str)
         if "スタッフ1" in loaded_ng.columns and "スタッフ2" in loaded_ng.columns: st.session_state.ng_pairs_df = loaded_ng[["スタッフ1", "スタッフ2"]]
@@ -185,6 +198,10 @@ def load_common_settings(xls):
         loaded_plock = pd.read_excel(xls, "個別期間ロック設定").fillna("").astype(str)
         if "スタッフ名" in loaded_plock.columns and "開始日" in loaded_plock.columns and "終了日" in loaded_plock.columns:
             st.session_state.personal_lock_df = loaded_plock[["スタッフ名", "開始日", "終了日"]]
+    if "委員会設定" in xls.sheet_names:
+        loaded_comm = pd.read_excel(xls, "委員会設定").fillna("").astype(str)
+        if "委員会名" in loaded_comm.columns and "対象シフト（例: 遅,明）" in loaded_comm.columns:
+            st.session_state.committee_df = loaded_comm[["委員会名", "対象シフト（例: 遅,明）"]]
 
 uploaded_file = st.sidebar.file_uploader("Excelファイルを選択", type=["xlsx"])
 if uploaded_file is not None:
@@ -237,7 +254,7 @@ if uploaded_file is not None:
                 if d_num and 1 <= d_num <= 31: normalized_req[str(d_num)] = [str(v).strip() for v in loaded_sched[col].values]
 
             if "スタッフ設定" not in xls.sheet_names:
-                new_s_list = [{"スタッフ名": s_name, "早の上限": "制限なし", "Qの上限": "制限なし", "遅の上限": "制限なし", "入の上限": "制限なし"} for s_name in loaded_sched.index.astype(str)]
+                new_s_list = [{"スタッフ名": s_name, "早の上限": "制限なし", "Qの上限": "制限なし", "遅の上限": "制限なし", "入の上限": "制限なし", "属性1": "", "属性2": ""} for s_name in loaded_sched.index.astype(str)]
                 st.session_state.staff_df = pd.DataFrame(new_s_list)
 
             st.session_state.req_df = normalized_req.copy()
@@ -253,7 +270,7 @@ if uploaded_file is not None:
 # 1. スタッフ名・個人条件・NGペア等の設定
 # =====================================================================
 st.subheader("1. スタッフ名・個人条件の設定")
-with st.expander("👥 スタッフ名（個人名への書き換え）・シフト上限・禁止条件を編集する", expanded=False):
+with st.expander("👥 スタッフ名（個人名への書き換え）・シフト上限・属性（委員会）を編集する", expanded=False):
     with st.popover("📝 スタッフ名をまとめて一括変更する（コピペ入力）"):
         bulk_names_text = st.text_area("スタッフ名リストを入力（例：佐藤、鈴木、高橋...）", height=150)
         if st.button("名前を一括反映する", type="primary"):
@@ -263,7 +280,7 @@ with st.expander("👥 スタッフ名（個人名への書き換え）・シフ
                 old_req_df = st.session_state.req_df.copy()
                 for idx, new_name in enumerate(raw_list):
                     if idx < len(new_staff_df): new_staff_df.loc[idx, "スタッフ名"] = new_name
-                    else: new_staff_df = pd.concat([new_staff_df, pd.DataFrame([{"スタッフ名": new_name, "早の上限": "制限なし", "Qの上限": "制限なし", "遅の上限": "制限なし", "入の上限": "制限なし"}])], ignore_index=True)
+                    else: new_staff_df = pd.concat([new_staff_df, pd.DataFrame([{"スタッフ名": new_name, "早の上限": "制限なし", "Qの上限": "制限なし", "遅の上限": "制限なし", "入の上限": "制限なし", "属性1": "", "属性2": ""}])], ignore_index=True)
                 st.session_state.staff_df = new_staff_df
                 updated_names = new_staff_df["スタッフ名"].tolist()
                 new_req_df = pd.DataFrame("", index=updated_names, columns=old_req_df.columns)
@@ -279,6 +296,8 @@ with st.expander("👥 スタッフ名（個人名への書き換え）・シフ
         "Qの上限": st.column_config.SelectboxColumn("Qの上限 (0=禁止)", options=limit_options, default="制限なし", required=True),
         "遅の上限": st.column_config.SelectboxColumn("遅の上限 (0=禁止)", options=limit_options, default="制限なし", required=True),
         "入の上限": st.column_config.SelectboxColumn("入の上限 (0=禁止)", options=limit_options, default="制限なし", required=True),
+        "属性1": st.column_config.TextColumn("属性1 (委員会等)", default=""),
+        "属性2": st.column_config.TextColumn("属性2 (委員会等)", default=""),
     }
     edited_staff_df = st.data_editor(st.session_state.staff_df, column_config=staff_col_config, num_rows="dynamic", use_container_width=True, height=min(420, 65 + len(st.session_state.staff_df) * 35), key=f"staff_editor_{ek}")
 
@@ -296,6 +315,15 @@ with st.expander("🚫 夜勤（入）の同日NGペア設定", expanded=False):
     }
     edited_ng_pairs_df = st.data_editor(st.session_state.ng_pairs_df, column_config=ng_col_config, num_rows="dynamic", use_container_width=True, key=f"ng_editor_{ek}")
 st.session_state.ng_pairs_df = edited_ng_pairs_df
+
+with st.expander("📋 委員会・グループ設定（同一日に特定シフトで集める）", expanded=False):
+    st.caption("・委員会名と、その実施時に割り当てたいシフトをカンマ区切りで入力します（例：遅, 明）。\n・対象者の「過半数」が、月内のどこか1日でこのシフトに配置されるようAIが自動探索します。")
+    comm_col_config = {
+        "委員会名": st.column_config.TextColumn("委員会名", required=True),
+        "対象シフト（例: 遅,明）": st.column_config.TextColumn("対象シフト（例: 遅,明）", required=True),
+    }
+    edited_committee_df = st.data_editor(st.session_state.committee_df, column_config=comm_col_config, num_rows="dynamic", use_container_width=True, key=f"comm_editor_{ek}")
+st.session_state.committee_df = edited_committee_df
 
 with st.expander("🔒 欠勤フォロー用：個別期間ロック設定（出勤停止などの期間を完全固定）", expanded=False):
     st.caption("・この期間内はAIによる自動調整が一切行われず、画面上で人間が指定した配分（有給や休）が100%守られます。")
@@ -359,6 +387,7 @@ with pd.ExcelWriter(save_output, engine='openpyxl') as writer:
     settings_df.to_excel(writer, sheet_name='基本設定', index=False)
     edited_staff_df.to_excel(writer, sheet_name='スタッフ設定', index=False)
     edited_ng_pairs_df.to_excel(writer, sheet_name='NGペア設定', index=False)
+    edited_committee_df.to_excel(writer, sheet_name='委員会設定', index=False)
     edited_personal_lock_df.to_excel(writer, sheet_name='個別期間ロック設定', index=False)
     save_req_df.to_excel(writer, sheet_name='希望休入力')
     apply_excel_dropdowns(writer, staffs, TARGET_DAYS)
@@ -399,7 +428,32 @@ def get_personal_locks():
             locks.append((staff_names.index(s_name), st_d, en_d))
     return locks
 
+def get_committees():
+    committees = []
+    for _, row in edited_committee_df.iterrows():
+        c_name = str(row.get("委員会名", "")).strip()
+        shifts_str = str(row.get("対象シフト（例: 遅,明）", "")).strip()
+        if c_name and shifts_str:
+            members = []
+            for s_idx in range(staffs):
+                attr1 = str(edited_staff_df.iloc[s_idx].get("属性1", "")).strip()
+                attr2 = str(edited_staff_df.iloc[s_idx].get("属性2", "")).strip()
+                if c_name == attr1 or c_name == attr2:
+                    members.append(s_idx)
+            
+            target_shifts = []
+            for s_name_part in shifts_str.replace("、", ",").split(","):
+                sn = s_name_part.strip()
+                if sn in str_to_shift:
+                    target_shifts.append(str_to_shift[sn])
+            
+            if members and target_shifts:
+                req_count = len(members) // 2 + 1
+                committees.append((c_name, members, target_shifts, req_count))
+    return committees
+
 PERSONAL_LOCKS = get_personal_locks()
+COMMITTEES = get_committees()
 SPECIFIC_SHIFTS, KIBOU_YASU_CELLS, PREV_CONSECUTIVE, ORIGINAL_SHIFTS, ORIGINAL_STR_SHIFTS = {}, set(), {}, {}, {}
 base_df = st.session_state.base_schedule_df
 
@@ -516,6 +570,7 @@ def run_normal_mode():
         model = cp_model.CpModel()
         B = {(s, d, t): model.NewBoolVar(f'B_{s}_{d}_{t}') for s in range(staffs) for d in range(TARGET_DAYS) for t in range(10)}
         five_consec_penalty_terms = []
+        committee_penalties = []
 
         for s in range(staffs):
             for d in range(TARGET_DAYS):
@@ -558,7 +613,6 @@ def run_normal_mode():
                 
                 model.Add(C_vars[d] == 0).OnlyEnforceIf(yasu_flag)
                 model.Add(C_vars[d] == prev_val + w_expr).OnlyEnforceIf(yasu_flag.Not())
-                
                 model.Add(C_vars[d] <= max_consec)
                 
                 if max_consec == 5:
@@ -573,11 +627,28 @@ def run_normal_mode():
         for s1, s2, _ in ng_pairs:
             for d in range(TARGET_DAYS): model.Add(B[s1, d, S_IRI] + B[s2, d, S_IRI] <= 1)
 
+        # ★追加：委員会・グループ配置のソフト制約
+        for c_idx, (c_name, members, t_shifts, req_count) in enumerate(COMMITTEES):
+            Z_days = []
+            for d in range(TARGET_DAYS):
+                Z_d = model.NewBoolVar(f'comm_{c_idx}_{d}')
+                model.Add(sum(B[s, d, t] for s in members for t in t_shifts) >= req_count).OnlyEnforceIf(Z_d)
+                Z_days.append(Z_d)
+            
+            met_any = model.NewBoolVar(f'comm_met_{c_idx}')
+            model.AddMaxEquality(met_any, Z_days)
+            viol = model.NewBoolVar(f'comm_viol_{c_idx}')
+            model.Add(met_any == 1).OnlyEnforceIf(viol.Not())
+            model.Add(met_any == 0).OnlyEnforceIf(viol)
+            
+            committee_penalties.append(viol * 50000)
+
         iri_counts = [model.NewIntVar(0, TARGET_DAYS, f'iri_{s}') for s in range(staffs)]
         for s in range(staffs): model.Add(iri_counts[s] == sum(B[s, d, S_IRI] for d in range(TARGET_DAYS)))
         max_iri = model.NewIntVar(0, TARGET_DAYS, 'max_iri')
         model.AddMaxEquality(max_iri, iri_counts)
-        model.Minimize(max_iri * 100 + sum(five_consec_penalty_terms))
+        
+        model.Minimize(max_iri * 100 + sum(five_consec_penalty_terms) + sum(committee_penalties))
 
         solver = cp_model.CpSolver()
         solver.parameters.num_search_workers = 8
@@ -604,7 +675,32 @@ def run_normal_mode():
             st.warning(f"⚠️ 基本の4連勤ルールでは条件が厳しすぎたため、一部ルールを緩和（【{used_step}】を適用）して作成しました。")
             
         res_df = format_result_df([[shift_str[next(t for t in range(10) if solver.Value(B[s, d, t]))] for d in range(TARGET_DAYS)] for s in range(staffs)])
-        return res_df, pd.DataFrame()
+        
+        # ★追加：委員会の最適日レポートの作成
+        comm_records = []
+        for c_idx, (c_name, members, t_shifts, req_count) in enumerate(COMMITTEES):
+            met_day = None
+            attendees = []
+            for d in range(TARGET_DAYS):
+                cnt = 0
+                att_names = []
+                for s in members:
+                    for t in t_shifts:
+                        if solver.Value(B[s, d, t]):
+                            cnt += 1
+                            att_names.append(f"{staff_names[s]}({shift_str[t]})")
+                if cnt >= req_count:
+                    met_day = d + 1
+                    attendees = att_names
+                    break
+            
+            if met_day is not None:
+                comm_records.append({"委員会名": c_name, "実施日": day_labels[met_day], "参加対象者": "、".join(attendees)})
+            else:
+                comm_records.append({"委員会名": c_name, "実施日": "⚠️ 条件を満たす日がありません", "参加対象者": "-"})
+        comm_res_df = pd.DataFrame(comm_records)
+        
+        return res_df, pd.DataFrame(), comm_res_df
     else:
         st.error("❌ 条件が厳しすぎます。原因調査モードへ移行します...")
         return run_debug_mode()
@@ -622,7 +718,6 @@ def run_reschedule_mode():
         model = cp_model.CpModel()
         B = {(s, d, t): model.NewBoolVar(f'B_{s}_{d}_{t}') for s in range(staffs) for d in range(TARGET_DAYS) for t in range(10)}
         obj_terms = []
-        five_consec_penalty_terms = []
 
         is_modified = [model.NewBoolVar(f'is_mod_{s}') for s in range(staffs)]
 
@@ -686,6 +781,7 @@ def run_reschedule_mode():
                     model.AddImplication(B[s, d, S_OSO], B[s, d+1, S_HAYA].Not())
                     model.AddImplication(B[s, d, S_OSO], B[s, d+1, S_Q].Not())
 
+        five_consec_penalty_terms = []
         for s in range(staffs):
             prev_c = PREV_CONSECUTIVE.get(s, 0)
             C_vars = [model.NewIntVar(0, 100, f'C_{s}_{d}') for d in range(TARGET_DAYS)]
@@ -718,6 +814,22 @@ def run_reschedule_mode():
 
         for s1, s2, _ in ng_pairs:
             for d in range(LOCK_UNTIL_DAY, TARGET_DAYS): model.Add(B[s1, d, S_IRI] + B[s2, d, S_IRI] <= 1)
+
+        # ★追加：委員会・グループ配置のソフト制約
+        for c_idx, (c_name, members, t_shifts, req_count) in enumerate(COMMITTEES):
+            Z_days = []
+            for d in range(TARGET_DAYS):
+                Z_d = model.NewBoolVar(f'comm_{c_idx}_{d}')
+                model.Add(sum(B[s, d, t] for s in members for t in t_shifts) >= req_count).OnlyEnforceIf(Z_d)
+                Z_days.append(Z_d)
+            
+            met_any = model.NewBoolVar(f'comm_met_{c_idx}')
+            model.AddMaxEquality(met_any, Z_days)
+            viol = model.NewBoolVar(f'comm_viol_{c_idx}')
+            model.Add(met_any == 1).OnlyEnforceIf(viol.Not())
+            model.Add(met_any == 0).OnlyEnforceIf(viol)
+            
+            obj_terms.append(viol * 50000)
 
         model.Minimize(sum(obj_terms))
         solver = cp_model.CpSolver()
@@ -770,7 +882,32 @@ def run_reschedule_mode():
             if not ui_changes: st.write("変更された箇所はありません。")
             else:
                 for ch in ui_changes: st.markdown(ch)
-        return result_df, changes_df
+                
+        # ★追加：委員会の最適日レポートの作成
+        comm_records = []
+        for c_idx, (c_name, members, t_shifts, req_count) in enumerate(COMMITTEES):
+            met_day = None
+            attendees = []
+            for d in range(TARGET_DAYS):
+                cnt = 0
+                att_names = []
+                for s in members:
+                    for t in t_shifts:
+                        if solver.Value(B[s, d, t]):
+                            cnt += 1
+                            att_names.append(f"{staff_names[s]}({shift_str[t]})")
+                if cnt >= req_count:
+                    met_day = d + 1
+                    attendees = att_names
+                    break
+            
+            if met_day is not None:
+                comm_records.append({"委員会名": c_name, "実施日": day_labels[met_day], "参加対象者": "、".join(attendees)})
+            else:
+                comm_records.append({"委員会名": c_name, "実施日": "⚠️ 条件を満たす日がありません", "参加対象者": "-"})
+        comm_res_df = pd.DataFrame(comm_records)
+
+        return result_df, changes_df, comm_res_df
     else:
         st.error("❌ 最小変更モードでは組めませんでした。原因調査モードへ移行します...")
         return run_debug_mode()
@@ -859,6 +996,23 @@ def run_debug_mode():
     for s1, s2, desc in ng_pairs:
         for d in range(TARGET_DAYS): model.Add(B[s1, d, S_IRI] + B[s2, d, S_IRI] <= 1)
 
+    # ★追加：原因調査モードでも委員会配置の違反をチェック
+    for c_idx, (c_name, members, t_shifts, req_count) in enumerate(COMMITTEES):
+        Z_days = []
+        for d in range(TARGET_DAYS):
+            Z_d = model.NewBoolVar(f'comm_{c_idx}_{d}')
+            model.Add(sum(B[s, d, t] for s in members for t in t_shifts) >= req_count).OnlyEnforceIf(Z_d)
+            Z_days.append(Z_d)
+        
+        met_any = model.NewBoolVar(f'comm_met_{c_idx}')
+        model.AddMaxEquality(met_any, Z_days)
+        viol = model.NewBoolVar(f'comm_viol_{c_idx}')
+        model.Add(met_any == 1).OnlyEnforceIf(viol.Not())
+        model.Add(met_any == 0).OnlyEnforceIf(viol)
+        
+        penalties.append(viol * 50000)
+        violations_info.append((viol, f"【委員会配置エラー】「{c_name}」の条件を満たす日が1日も作れませんでした"))
+
     model.Minimize(sum(penalties))
     solver = cp_model.CpSolver()
     solver.parameters.num_search_workers = 8
@@ -873,10 +1027,10 @@ def run_debug_mode():
             st.error(f"🚨 以下のルールが衝突しています（計 {len(broken_rules)} 件）：")
             for rule in broken_rules: st.write(f"・ {rule}")
         raw_table = [[shift_str[next(t for t in range(10) if solver.Value(B[s, d, t]))] for d in range(TARGET_DAYS)] for s in range(staffs)]
-        return format_result_df(raw_table), pd.DataFrame()
+        return format_result_df(raw_table), pd.DataFrame(), pd.DataFrame()
     else:
         st.error("指定自体が矛盾しています。")
-        return pd.DataFrame(), pd.DataFrame()
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
 # =====================================================================
 # 3. 実行ボタンと結果出力
@@ -886,22 +1040,35 @@ btn_label = "🛠️ 最小変更でシフトを再作成する（欠勤フォ�
 
 if st.button(btn_label, type="primary", use_container_width=True):
     if check_shortage():
-        if "通常作成" in mode: result_df, changes_df = run_normal_mode()
-        elif "欠勤フォロー" in mode: result_df, changes_df = run_reschedule_mode()
-        else: result_df, changes_df = run_debug_mode()
+        if "通常作成" in mode: result_df, changes_df, comm_res_df = run_normal_mode()
+        elif "欠勤フォロー" in mode: result_df, changes_df, comm_res_df = run_reschedule_mode()
+        else: result_df, changes_df, comm_res_df = run_debug_mode()
             
         if not result_df.empty:
+            
+            # ★追加：委員会の日程結果を画面に表示
+            if not comm_res_df.empty:
+                st.markdown("### 📋 AIが決定した委員会・グループ日程")
+                st.table(comm_res_df)
+                st.divider()
+
             styled_result = style_shift_df(result_df)
             st.dataframe(styled_result, use_container_width=True, height=min(620, 65 + staffs * 35))
             
             output = io.BytesIO()
             with pd.ExcelWriter(output, engine='openpyxl') as writer:
                 styled_result.to_excel(writer, sheet_name='完成シフト表')
+                
+                # ★追加：委員会の日程結果をExcelに出力
+                if not comm_res_df.empty:
+                    comm_res_df.to_excel(writer, sheet_name='委員会日程表', index=False)
+                    
                 if not changes_df.empty:
                     changes_df.to_excel(writer, sheet_name='変更依頼リスト', index=False)
                 settings_df.to_excel(writer, sheet_name='基本設定', index=False)
                 edited_staff_df.to_excel(writer, sheet_name='スタッフ設定', index=False)
                 edited_ng_pairs_df.to_excel(writer, sheet_name='NGペア設定', index=False)
+                edited_committee_df.to_excel(writer, sheet_name='委員会設定', index=False)
                 edited_personal_lock_df.to_excel(writer, sheet_name='個別期間ロック設定', index=False)
                 save_req_df.to_excel(writer, sheet_name='希望休入力')
                 apply_excel_dropdowns(writer, staffs, TARGET_DAYS)
