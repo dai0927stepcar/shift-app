@@ -4,6 +4,8 @@ import datetime
 import pandas as pd
 import streamlit as st
 from ortools.sat.python import cp_model
+from openpyxl.worksheet.datavalidation import DataValidation
+from openpyxl.utils import get_column_letter
 
 st.set_page_config(page_title="シフト自動作成システム", layout="wide")
 st.title("📅 シフト自動作成システム")
@@ -66,6 +68,28 @@ def extract_day_num(col_name):
     s = str(col_name).strip()
     if "(" in s: s = s.split("(")[0].strip()
     return int(s) if s.isdigit() else None
+
+# ★新規追加：Excelにプルダウン（データの入力規則）を設定する関数
+def apply_excel_dropdowns(writer, staffs_count, target_days):
+    shift_list = '"早,Q,遅,入,明,希望休,休,有給,研修,OJT,フリー"'
+    
+    if '希望休入力' in writer.sheets:
+        ws_req = writer.sheets['希望休入力']
+        dv_req = DataValidation(type="list", formula1=shift_list, allow_blank=True)
+        ws_req.add_data_validation(dv_req)
+        # B列は前月連勤、C列から月末までがシフト入力欄
+        dv_req.add(f"C2:{get_column_letter(2 + target_days)}{1 + staffs_count}")
+        
+        dv_prev = DataValidation(type="list", formula1='"0,1,2,3,4,5"', allow_blank=True)
+        ws_req.add_data_validation(dv_prev)
+        dv_prev.add(f"B2:B{1 + staffs_count}")
+        
+    if '完成シフト表' in writer.sheets:
+        ws_res = writer.sheets['完成シフト表']
+        dv_res = DataValidation(type="list", formula1=shift_list, allow_blank=True)
+        ws_res.add_data_validation(dv_res)
+        # 完成シフト表はA列が名前、B列から月末までがシフト入力欄
+        dv_res.add(f"B2:{get_column_letter(1 + target_days)}{1 + staffs_count}")
 
 # セッション状態の初期化
 now = datetime.datetime.now()
@@ -333,12 +357,16 @@ settings_df = pd.DataFrame([
 save_req_df = edited_req_df.copy()
 save_req_df.columns = [PREV_COL] + [day_labels[int(c)] for c in day_cols]
 save_output = io.BytesIO()
+
+# ★保存処理：プルダウンを追加してExcelを出力
 with pd.ExcelWriter(save_output, engine='openpyxl') as writer:
     settings_df.to_excel(writer, sheet_name='基本設定', index=False)
     edited_staff_df.to_excel(writer, sheet_name='スタッフ設定', index=False)
     edited_ng_pairs_df.to_excel(writer, sheet_name='NGペア設定', index=False)
     edited_personal_lock_df.to_excel(writer, sheet_name='個別期間ロック設定', index=False)
     save_req_df.to_excel(writer, sheet_name='希望休入力')
+    apply_excel_dropdowns(writer, staffs, TARGET_DAYS)
+
 save_excel_bytes = save_output.getvalue()
 
 col_save1, col_save2 = st.columns([1, 1])
@@ -485,11 +513,9 @@ def run_normal_mode():
             for d in range(TARGET_DAYS):
                 model.AddExactlyOne([B[s, d, t] for t in range(10)])
                 req_shift = SPECIFIC_SHIFTS.get((s, d+1))
-                
                 if req_shift != S_YUKU: model.Add(B[s, d, S_YUKU] == 0)
                 if req_shift != S_KEN:  model.Add(B[s, d, S_KEN] == 0)
                 if req_shift != S_OJT:  model.Add(B[s, d, S_OJT] == 0)
-                
                 if req_shift is not None: model.Add(B[s, d, req_shift] == 1)
             model.Add(sum(B[s, d, S_YASU] for d in range(TARGET_DAYS)) == TARGET_YASU)
 
@@ -567,9 +593,6 @@ def run_reschedule_mode():
 
         is_modified = [model.NewBoolVar(f'is_mod_{s}') for s in range(staffs)]
         for s in range(staffs):
-            obj_terms.append(is_modified[s] * 1000)
-
-        for s in range(staffs):
             model.Add(sum(B[s, d, S_YASU] for d in range(TARGET_DAYS)) == TARGET_YASU)
 
             for d in range(TARGET_DAYS):
@@ -604,15 +627,12 @@ def run_reschedule_mode():
                             if orig_t in [S_OJT, S_FREE]:
                                 obj_terms.append((1 - B[s, d, orig_t]) * 5)
                             elif orig_t in [S_IRI, S_AKE]:
-                                # ★3-3 修正：入、明の変更コストを20に変更
                                 obj_terms.append((1 - B[s, d, orig_t]) * 20)
                                 model.AddImplication(B[s, d, orig_t].Not(), is_modified[s])
                             elif orig_t == S_YASU:
-                                # ★3-3 修正：休の変更コストを30に変更
                                 obj_terms.append((1 - B[s, d, S_YASU]) * 30)
                                 model.AddImplication(B[s, d, S_YASU].Not(), is_modified[s])
                             else:
-                                # 早、遅、Qなどの変更コストは10
                                 obj_terms.append((1 - B[s, d, orig_t]) * 10)
                                 model.AddImplication(B[s, d, orig_t].Not(), is_modified[s])
 
@@ -764,10 +784,6 @@ def run_debug_mode():
         if max_c == 0: add_soft(model.Add(sum(B[s_idx, d, s_type] for d in range(TARGET_DAYS)) == 0), 20, f"【条件違反】{desc}")
         else: add_soft(model.Add(sum(B[s_idx, d, s_type] for d in range(TARGET_DAYS)) <= max_c), 20, f"【条件違反】{desc}")
 
-    # ★4-2 修正：NGペアをソフト制約（add_soft）から絶対ルール（model.Add）へ格上げしました
-    for s1, s2, desc in ng_pairs:
-        for d in range(TARGET_DAYS): model.Add(B[s1, d, S_IRI] + B[s2, d, S_IRI] <= 1)
-
     model.Minimize(sum(penalties))
     solver = cp_model.CpSolver()
     solver.parameters.num_search_workers = 8
@@ -804,6 +820,7 @@ if st.button(btn_label, type="primary", use_container_width=True):
             st.dataframe(styled_result, use_container_width=True, height=min(620, 65 + staffs * 35))
             
             output = io.BytesIO()
+            # ★保存処理：完成シフト表出力時にもプルダウンを追加
             with pd.ExcelWriter(output, engine='openpyxl') as writer:
                 styled_result.to_excel(writer, sheet_name='完成シフト表')
                 if not changes_df.empty:
@@ -813,6 +830,7 @@ if st.button(btn_label, type="primary", use_container_width=True):
                 edited_ng_pairs_df.to_excel(writer, sheet_name='NGペア設定', index=False)
                 edited_personal_lock_df.to_excel(writer, sheet_name='個別期間ロック設定', index=False)
                 save_req_df.to_excel(writer, sheet_name='希望休入力')
+                apply_excel_dropdowns(writer, staffs, TARGET_DAYS)
             excel_data = output.getvalue()
             
             st.download_button(
