@@ -9,6 +9,8 @@ import streamlit as st
 from ortools.sat.python import cp_model
 from openpyxl.worksheet.datavalidation import DataValidation
 from openpyxl.utils import get_column_letter
+from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
+from openpyxl.formatting.rule import CellIsRule
 
 st.set_page_config(page_title="シフト自動作成システム", layout="wide")
 st.title("📅 シフト自動作成システム")
@@ -43,7 +45,7 @@ shift_str = {
     S_AKE: '明', S_YASU: '休', S_YUKU: '有給', S_KEN: '研修', S_FREE: 'フリー', S_OJT: 'OJT'
 }
 
-# 内部計算のためにすべての表記を同じシフトIDにマッピング（単独表記などは読み込み互換用）
+# 内部計算マッピング（単独表記は互換性維持のため残存）
 str_to_shift = {
     '早': S_HAYA, '早①': S_HAYA, '早②': S_HAYA, '早③': S_HAYA,
     'Q': S_Q,
@@ -54,7 +56,7 @@ str_to_shift = {
     '有給': S_YUKU, '研修': S_KEN, 'フリー': S_FREE, 'OJT': S_OJT
 }
 
-# 新規作成・プルダウン用（単独表記なし）
+# 新規作成・プルダウン用
 shift_options = ["", "早①", "早②", "早③", "Q", "遅①", "遅②", "遅③", "A夜", "B夜", "A明", "B明", "希望休", "休", "有給", "研修", "OJT", "フリー"]
 allowed_shifts = set(shift_options)
 
@@ -88,20 +90,16 @@ def extract_day_num(col_name):
 
 def apply_excel_dropdowns(writer, staffs_count, target_days):
     shift_list = '"早①,早②,早③,Q,遅①,遅②,遅③,A夜,B夜,A明,B明,希望休,休,有給,研修,OJT,フリー"'
-    
     dv = DataValidation(type="list", formula1=shift_list, allow_blank=True, 
                         showErrorMessage=True, errorStyle="stop", 
                         errorTitle="入力エラー", error="リストから指定の勤務区分を選択してください。旧表記（早・遅など）は禁止されています。")
-    
     if '希望休入力' in writer.sheets:
         ws_req = writer.sheets['希望休入力']
         ws_req.add_data_validation(dv)
         dv.add(f"C2:{get_column_letter(2 + target_days)}{1 + staffs_count}")
-        
         dv_prev = DataValidation(type="list", formula1='"0,1,2,3,4,5"', allow_blank=True, showErrorMessage=True, errorStyle="stop", errorTitle="入力エラー", error="0〜5の整数を入力してください。")
         ws_req.add_data_validation(dv_prev)
         dv_prev.add(f"B2:B{1 + staffs_count}")
-        
     if '完成シフト表' in writer.sheets:
         ws_res = writer.sheets['完成シフト表']
         dv_res = DataValidation(type="list", formula1=shift_list, allow_blank=True, 
@@ -109,12 +107,191 @@ def apply_excel_dropdowns(writer, staffs_count, target_days):
                                 errorTitle="入力エラー", error="リストから指定の勤務区分を選択してください。")
         ws_res.add_data_validation(dv_res)
         dv_res.add(f"B2:{get_column_letter(1 + target_days)}{1 + staffs_count}")
-        
     if '診断用シフト表（未確定）' in writer.sheets:
         ws_diag = writer.sheets['診断用シフト表（未確定）']
         dv_diag = DataValidation(type="list", formula1=shift_list, allow_blank=True, showErrorMessage=False)
         ws_diag.add_data_validation(dv_diag)
         dv_diag.add(f"B2:{get_column_letter(1 + target_days)}{1 + staffs_count}")
+
+# =====================================================================
+# ★新規追加：A3掲示用シートを作成する関数
+# =====================================================================
+def add_a3_print_sheet(writer, result_df, staff_names, target_year, target_month, target_days, comm_res_df, changes_df):
+    wb = writer.book
+    ws = wb.create_sheet("掲示用A3", 0) # 先頭に作成
+    wb.active = ws # 初期表示シートに設定
+    
+    # 印刷設定 (A3:9, ランドスケープ, 余白狭め, 1ページ幅に収める, 水平中央)
+    ws.page_setup.paperSize = ws.PAPERSIZE_A3
+    ws.page_setup.orientation = ws.ORIENTATION_LANDSCAPE
+    ws.page_setup.fitToPage = True
+    ws.page_setup.fitToWidth = 1
+    ws.page_setup.fitToHeight = 0 # 縦は成り行き
+    ws.page_margins.left = 0.25
+    ws.page_margins.right = 0.25
+    ws.page_margins.top = 0.3
+    ws.page_margins.bottom = 0.3
+    ws.print_options.horizontalCentered = True
+    
+    font_meiryo = "Meiryo"
+    font_title = Font(name=font_meiryo, size=16, bold=True)
+    font_normal = Font(name=font_meiryo, size=9)
+    font_staff = Font(name=font_meiryo, size=10)
+    
+    align_c = Alignment(horizontal="center", vertical="center")
+    align_l = Alignment(horizontal="left", vertical="center")
+    align_r = Alignment(horizontal="right", vertical="center")
+    
+    thin = Side(border_style="thin", color="000000")
+    border_all = Border(top=thin, left=thin, right=thin, bottom=thin)
+    border_changed = Border(top=Side(style="medium", color="FF0000"), bottom=Side(style="medium", color="FF0000"), left=Side(style="medium", color="FF0000"), right=Side(style="medium", color="FF0000"))
+    
+    # 変更箇所のトラッキング (欠勤フォロー用)
+    changed_cells = []
+    if not changes_df.empty:
+        for _, row in changes_df.iterrows():
+            d_str = str(row.get("日付", ""))
+            s_name = str(row.get("スタッフ名", ""))
+            if d_str and s_name:
+                d_num = extract_day_num(d_str)
+                if d_num:
+                    changed_cells.append((s_name, d_num))
+
+    # --- 1. タイトル領域 ---
+    ws.merge_cells(start_row=1, start_column=1, end_row=2, end_column=target_days+1)
+    title_cell = ws.cell(row=1, column=1, value=f"{target_year}年{target_month}月 勤務表")
+    title_cell.font = font_title
+    title_cell.alignment = align_c
+    
+    # --- 2. 委員会情報（サブタイトル） ---
+    comm_text = ""
+    if not comm_res_df.empty:
+        dates_list = []
+        for _, row in comm_res_df.iterrows():
+            c_name = row.get("委員会名", "")
+            d_str = row.get("実施日", "")
+            if "⚠️" not in d_str:
+                dates_list.append(f"{c_name}: {d_str}")
+        if dates_list:
+            comm_text = "★ 委員会実施日： " + " ／ ".join(dates_list)
+    ws.merge_cells(start_row=3, start_column=1, end_row=3, end_column=target_days+1)
+    sub_cell = ws.cell(row=3, column=1, value=comm_text)
+    sub_cell.font = Font(name=font_meiryo, size=10, bold=True, color="0000FF")
+    sub_cell.alignment = align_r
+    
+    # --- 3. 勤務表ヘッダー ---
+    ws.cell(row=4, column=1, value="職員名").font = font_staff
+    ws.cell(row=4, column=1).alignment = align_c
+    ws.cell(row=4, column=1).border = border_all
+    ws.cell(row=5, column=1, value="").border = border_all # 下段用
+    ws.merge_cells(start_row=4, start_column=1, end_row=5, end_column=1)
+    ws.column_dimensions['A'].width = 18
+
+    # 日付列の特定 (集計列を除外)
+    day_cols = []
+    for col in result_df.columns:
+        if "【" not in str(col):
+            day_cols.append(col)
+            
+    # 日付と曜日の書き込み
+    for i, col_name in enumerate(day_cols):
+        col_idx = i + 2
+        d_num = extract_day_num(col_name)
+        if not d_num: continue
+        
+        wd_idx = datetime.date(target_year, target_month, d_num).weekday()
+        wd_str = WEEKDAYS_JP[wd_idx]
+        
+        c_day = ws.cell(row=4, column=col_idx, value=d_num)
+        c_wd = ws.cell(row=5, column=col_idx, value=wd_str)
+        
+        c_day.font = font_normal
+        c_wd.font = font_normal
+        c_day.alignment = align_c
+        c_wd.alignment = align_c
+        c_day.border = border_all
+        c_wd.border = border_all
+        
+        ws.column_dimensions[get_column_letter(col_idx)].width = 5
+        
+        # 土日・色付け
+        if wd_idx == 5: # 土曜
+            c_day.fill = PatternFill(start_color="DCE6FA", end_color="DCE6FA", fill_type="solid")
+            c_wd.fill = PatternFill(start_color="DCE6FA", end_color="DCE6FA", fill_type="solid")
+        elif wd_idx == 6: # 日曜
+            c_day.fill = PatternFill(start_color="F7DADA", end_color="F7DADA", fill_type="solid")
+            c_wd.fill = PatternFill(start_color="F7DADA", end_color="F7DADA", fill_type="solid")
+            
+        # 委員会★マーク
+        if "★" in col_name:
+            c_day.value = f"★\n{d_num}"
+            c_day.font = Font(name=font_meiryo, size=8, bold=True, color="FF0000")
+            c_day.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+
+    # --- 4. 勤務表本体（数式で連動） ---
+    start_row = 6
+    for r_idx, s_name in enumerate(staff_names):
+        cur_row = start_row + r_idx
+        ws.row_dimensions[cur_row].height = 20
+        
+        c_name = ws.cell(row=cur_row, column=1, value=s_name)
+        c_name.font = font_staff
+        c_name.alignment = align_l
+        c_name.border = border_all
+        
+        for i, col_name in enumerate(day_cols):
+            col_idx = i + 2
+            d_num = extract_day_num(col_name)
+            
+            # 数式で「完成シフト表」を参照する (空欄対応)
+            src_col_letter = get_column_letter(col_idx)
+            src_row = r_idx + 2 # 完成シフト表は2行目からデータ開始
+            formula = f'=IF(完成シフト表!{src_col_letter}{src_row}="","",完成シフト表!{src_col_letter}{src_row})'
+            
+            c_val = ws.cell(row=cur_row, column=col_idx, value=formula)
+            c_val.font = font_normal
+            c_val.alignment = align_c
+            
+            # 変更箇所の強調表示
+            if (s_name, d_num) in changed_cells:
+                c_val.border = border_changed
+            else:
+                c_val.border = border_all
+                
+    # --- 5. 条件付き書式（色分け） ---
+    # 完成シフト表を手動で修正した場合も、A3シートの色分けが自動追従するように設定
+    range_str = f"B6:{get_column_letter(target_days+1)}{start_row + len(staff_names) - 1}"
+    
+    color_rules = [
+        (['早①','早②','早③'], "FFF0CD"),
+        (['遅①','遅②','遅③'], "FBE6D3"),
+        (['A夜','B夜'], "DCE6FA"),
+        (['A明','B明'], "E9EDFA"),
+        (['休','希望休'], "F7DADA"),
+        (['有給'], "DDF2E3")
+    ]
+    
+    for vals, color_hex in color_rules:
+        fill = PatternFill(start_color=color_hex, end_color=color_hex, fill_type="solid")
+        for val in vals:
+            rule = CellIsRule(operator='equal', formula=[f'"{val}"'], fill=fill)
+            ws.conditional_formatting.add(range_str, rule)
+            
+    # --- 6. 凡例領域 ---
+    legend_row = start_row + len(staff_names) + 1
+    ws.cell(row=legend_row, column=1, value="【凡例】").font = Font(name=font_meiryo, size=9, bold=True)
+    
+    l_col = 2
+    for vals, color_hex in color_rules:
+        c_leg = ws.cell(row=legend_row, column=l_col, value=vals[0][:-1] if "①" in vals[0] else vals[0])
+        c_leg.fill = PatternFill(start_color=color_hex, end_color=color_hex, fill_type="solid")
+        c_leg.font = font_normal
+        c_leg.alignment = align_c
+        c_leg.border = border_all
+        ws.merge_cells(start_row=legend_row, start_column=l_col, end_row=legend_row, end_column=l_col+1)
+        l_col += 2
+
+    ws.print_area = f"A1:{get_column_letter(target_days+1)}{legend_row}"
 
 # セッション状態の初期化
 now = datetime.datetime.now()
@@ -177,53 +354,40 @@ def get_state_hash():
     return hashlib.sha256(s.encode('utf-8')).hexdigest()
 
 # =====================================================================
-# ★変更：職員名と個人条件の同期（行ID追跡・キャッシュ保護付き）
+# 職員名の同期機能
 # =====================================================================
 def sync_data_editor_state(edited_df):
     new_names = [str(n).strip() for n in edited_df["スタッフ名"] if str(n).strip()]
+    if len(new_names) == 0: return False, "❌ スタッフ名が1件も登録されていません。"
+    if len(new_names) != len(set(new_names)): return False, "❌ スタッフ名が重複しています。"
     
-    if len(new_names) == 0:
-        return False, "❌ スタッフ名が1件も登録されていません。"
-    if len(new_names) != len(set(new_names)):
-        return False, "❌ スタッフ名が重複しています。別々の名前に変更してください。"
-    
-    # 完全に同じDataFrameなら何もせず正常終了
-    if edited_df.equals(st.session_state.staff_df):
-        return True, ""
+    if edited_df.equals(st.session_state.staff_df): return True, ""
         
     old_req = st.session_state.req_df
     old_staff = st.session_state.staff_df
-    
     new_req = pd.DataFrame("", index=new_names, columns=old_req.columns)
     new_req[PREV_COL] = "0"
     
     for new_idx, row in edited_df.iterrows():
         new_name = str(row["スタッフ名"]).strip()
-        
-        # 行のインデックス（変更前と変更後）で対応関係を追跡し、希望休を引継ぐ
         if new_idx in old_staff.index:
             old_name = str(old_staff.loc[new_idx, "スタッフ名"]).strip()
             if old_name in old_req.index:
                 new_req.loc[new_name] = old_req.loc[old_name]
-        else:
-            # 新規追加の行（または対応不明）
-            pass
-            
+                
     st.session_state.req_df = new_req
     st.session_state.staff_df = edited_df.copy()
     st.session_state.staff_names = new_names
     
-    # 名前リストが変わった場合は欠勤フォローの基準シフトを破棄する
     if st.session_state.base_schedule_df is not None:
         if set(new_names) != set(st.session_state.base_schedule_df.index):
             st.session_state.base_schedule_df = None
             
-    # 個人条件や名前が変わったのでキャッシュは無効化する
     st.session_state.assigned_result = None
     return True, ""
 
 # =====================================================================
-# ★変更：Excel検証と一括読み込み（トランザクション・完全排除）
+# Excel検証と一括読み込み
 # =====================================================================
 def verify_and_load_excel(xls_file, is_base_schedule=False):
     errors = []
@@ -234,7 +398,6 @@ def verify_and_load_excel(xls_file, is_base_schedule=False):
         
     temp_state = {}
     
-    # --- 1. 基本設定シートの検証 ---
     if "基本設定" not in xls.sheet_names:
         errors.append("「基本設定」シートが存在しません。")
     else:
@@ -243,7 +406,6 @@ def verify_and_load_excel(xls_file, is_base_schedule=False):
             errors.append("「基本設定」シートに必須列（設定項目、設定値）が存在しません。")
         else:
             settings = dict(zip(df_set["設定項目"].astype(str), df_set["設定値"]))
-            
             raw_y = str(settings.get("対象年", "")).strip()
             raw_m = str(settings.get("対象月", "")).strip()
             raw_d = str(settings.get("月の日数", "")).strip()
@@ -283,7 +445,6 @@ def verify_and_load_excel(xls_file, is_base_schedule=False):
                 q_raw = str(settings.get("Qを配置しない日", ""))
                 temp_state['q_days'] = [] if not q_raw or q_raw.lower()=="nan" or q_raw=="なし" else [int(x.strip().split(".")[0]) for x in q_raw.split(",") if x.strip().split(".")[0].isdigit()]
 
-    # --- 2. スタッフ設定シートの検証 ---
     if "スタッフ設定" not in xls.sheet_names:
         errors.append("「スタッフ設定」シートが存在しません。")
     else:
@@ -304,7 +465,6 @@ def verify_and_load_excel(xls_file, is_base_schedule=False):
             temp_state['staff_df'] = df_staff
             temp_state['staff_names'] = names
 
-    # --- 3. 勤務表シートの検証（希望休入力・完成シフト表） ---
     if "希望休入力" not in xls.sheet_names:
         errors.append("「希望休入力」シートが存在しません（前月連勤の取得に必須です）。")
         
@@ -326,7 +486,6 @@ def verify_and_load_excel(xls_file, is_base_schedule=False):
             
         norm_cols = [PREV_COL] + [str(i) for i in range(1, temp_state['days'] + 1)]
         
-        # 前月連勤は希望休シートから探す
         req_prev_col = None
         for col in df_req_sheet.columns:
             if str(col).strip() == PREV_COL: req_prev_col = col
@@ -371,13 +530,12 @@ def verify_and_load_excel(xls_file, is_base_schedule=False):
                     if not is_base_schedule:
                         req_val = str(df_req_sheet.loc[s_name, col_key]).strip() if s_name in df_req_sheet.index and col_key in df_req_sheet.columns else ""
                         if req_val and req_val not in allowed_shifts:
-                            errors.append(f"希望休入力：{s_name}さんの{d}日の入力値「{req_val}」は不正な勤務区分です（旧表記は使用不可）。")
+                            errors.append(f"希望休入力：{s_name}さんの{d}日の入力値「{req_val}」は不正な勤務区分です。")
                         normalized_req.loc[s_name, str(d)] = req_val
                     else:
-                        # 欠勤フォロー時：req_dfにも「完成シフト結果」を入れる
                         base_val = str(df_target_sheet.loc[s_name, col_key]).strip() if s_name in df_target_sheet.index else ""
                         if base_val and base_val not in allowed_shifts:
-                            errors.append(f"完成シフト表：{s_name}さんの{d}日の結果「{base_val}」は不正な勤務区分です（旧表記を含むファイルは読み込めません）。")
+                            errors.append(f"完成シフト表：{s_name}さんの{d}日の結果「{base_val}」は不正な勤務区分です。")
                         normalized_req.loc[s_name, str(d)] = base_val
                         normalized_base.loc[s_name, str(d)] = base_val
 
@@ -387,7 +545,6 @@ def verify_and_load_excel(xls_file, is_base_schedule=False):
             else:
                 temp_state['base_schedule_df'] = None
 
-    # --- 4. その他の設定シート ---
     if not errors:
         if "NGペア設定" in xls.sheet_names:
             df_ng = pd.read_excel(xls, "NGペア設定").fillna("").astype(str)
@@ -420,7 +577,6 @@ def validate_manual_inputs(req_df, staff_list, target_days):
     
     for d in range(1, target_days + 1):
         day_reqs = [str(req_df.loc[s_name, str(d)]).strip() for s_name in staff_list if str(d) in req_df.columns]
-        
         for role in ['早①','早②','早③', '遅①','遅②','遅③', 'A夜','B夜', 'A明','B明']:
             if day_reqs.count(role) > 1:
                 fatal_input_errors.append(f"{d}日で「{role}」の手動指定が重複しています。")
@@ -451,7 +607,6 @@ if new_year != st.session_state.setting_year or new_month != st.session_state.se
     _, max_d = calendar.monthrange(new_year, new_month)
     st.session_state.setting_days = max_d
     
-    # 存在しない日付のデータを切り落とすため req_df を再構築
     old_req = st.session_state.req_df
     new_cols = [PREV_COL] + [str(i) for i in range(1, max_d + 1)]
     new_req = pd.DataFrame("", index=st.session_state.staff_names, columns=new_cols)
@@ -461,7 +616,6 @@ if new_year != st.session_state.setting_year or new_month != st.session_state.se
                 if c in old_req.columns:
                     new_req.loc[s_name, c] = old_req.loc[s_name, c]
     st.session_state.req_df = new_req
-    
     st.session_state.setting_q_days = [d for d in st.session_state.setting_q_days if d <= max_d]
     st.session_state.base_schedule_df = None
     st.session_state.editor_key += 1
@@ -582,7 +736,6 @@ with st.expander("👥 スタッフ名（個人名への書き換え）・シフ
     }
     edited_staff_df = st.data_editor(st.session_state.staff_df, column_config=staff_col_config, num_rows="dynamic", use_container_width=True, height=min(420, 65 + len(st.session_state.staff_df) * 35), key=f"staff_editor_{ek}")
 
-# data_editor の変更を無条件に捕捉して保存・キャッシュクリアを行う
 if not edited_staff_df.equals(st.session_state.staff_df):
     is_ok, err_msg = sync_data_editor_state(edited_staff_df)
     if not is_ok:
@@ -817,6 +970,31 @@ def is_explicit_fixed(s_name, d):
 # 表示用役割名の割り当て
 # =====================================================================
 def assign_role_names(raw_table_data, req_df):
+    fatal_errors = []
+    
+    for s in range(staffs):
+        for d in range(1, TARGET_DAYS):
+            is_f_iri, r_iri = is_explicit_fixed(staff_names[s], d)
+            is_f_ake, r_ake = is_explicit_fixed(staff_names[s], d+1)
+            iri_l = r_iri[0] if is_f_iri and r_iri in ['A夜', 'B夜'] else None
+            ake_l = r_ake[0] if is_f_ake and r_ake in ['A明', 'B明'] else None
+            if iri_l and ake_l and iri_l != ake_l:
+                fatal_errors.append(f"{staff_names[s]}さんの{d}日夜勤入り（{r_iri}）と翌日夜勤明け（{r_ake}）の固定指定が矛盾しています。")
+
+    ake_staffs_d1 = [s for s in range(staffs) if raw_table_data[s][0] == '明']
+    req_ake_counts = {'A明': [], 'B明': []}
+    for s in ake_staffs_d1:
+        is_f, req_val = is_explicit_fixed(staff_names[s], 1)
+        if is_f and req_val in req_ake_counts:
+            req_ake_counts[req_val].append(staff_names[s])
+    if len(req_ake_counts['A明']) > 1:
+        fatal_errors.append(f"1日の夜勤明けで「A明」の固定指定が重複しています（{', '.join(req_ake_counts['A明'])}）。")
+    if len(req_ake_counts['B明']) > 1:
+        fatal_errors.append(f"1日の夜勤明けで「B明」の固定指定が重複しています（{', '.join(req_ake_counts['B明'])}）。")
+
+    if fatal_errors:
+        return fatal_errors
+
     for d_idx in range(TARGET_DAYS):
         d = d_idx + 1
         
@@ -825,7 +1003,6 @@ def assign_role_names(raw_table_data, req_df):
         iri_staffs  = [s for s in range(staffs) if raw_table_data[s][d_idx] == '入']
         ake_staffs  = [s for s in range(staffs) if raw_table_data[s][d_idx] == '明']
         
-        # 共通割り当て関数（優先順位：①明示固定 → ②維持（欠勤フォロー） → ③ランダム）
         def assign_roles(staff_list, available_roles, base_role, check_prev_maintain=False):
             assigned = {}
             avail = available_roles.copy()
@@ -857,14 +1034,12 @@ def assign_role_names(raw_table_data, req_df):
 
             return assigned
 
-        # 早番・遅番の割り当て
         assigned_haya = assign_roles(haya_staffs, ['早①', '早②', '早③'], '早', check_prev_maintain=True)
         for s, r in assigned_haya.items(): raw_table_data[s][d_idx] = r
 
         assigned_oso = assign_roles(oso_staffs, ['遅①', '遅②', '遅③'], '遅', check_prev_maintain=True)
         for s, r in assigned_oso.items(): raw_table_data[s][d_idx] = r
 
-        # 夜勤入りの割り当て（翌日の明けの手動固定を先読みして確定させる）
         assigned_iri = {}
         avail_iri = ['A夜', 'B夜']
         unassigned_iri = []
@@ -904,7 +1079,6 @@ def assign_role_names(raw_table_data, req_df):
 
         for s, r in assigned_iri.items(): raw_table_data[s][d_idx] = r
 
-        # 夜勤明けの割り当て（必ず1日前の「実際の勤務区分」だけを踏襲する）
         assigned_ake = {}
         avail_ake = ['A明', 'B明']
         unassigned_ake = []
@@ -954,14 +1128,12 @@ def assign_role_names(raw_table_data, req_df):
                 
         for s, r in assigned_ake.items(): raw_table_data[s][d_idx] = r
 
-# =====================================================================
-# ★全日程の割り当て最終検証（デバッグモード等のルール違反と致命的矛盾の分離）
-# =====================================================================
+    return fatal_errors
+
 def validate_assigned_roles(raw_table_data, original_raw_table):
     fatal_errors = []
     rule_warnings = []
     
-    # 1. 人数と割り当て重複の検証（デバッグ用緩和の検知）
     for d_idx in range(TARGET_DAYS):
         d = d_idx + 1
         orig_shifts = [original_raw_table[s][d_idx] for s in range(staffs)]
@@ -986,7 +1158,6 @@ def validate_assigned_roles(raw_table_data, original_raw_table):
                 if '?' in x:
                     rule_warnings.append(f"{d}日の{staff_names[s]}さんの「{x}」が未確定です。人数制約緩和や手動指定の矛盾が原因の可能性があります。")
 
-    # 2. 逆方向も含めた夜勤リレーの完全検証
     for s in range(staffs):
         for d in range(TARGET_DAYS - 1):
             curr_a = raw_table_data[s][d]
@@ -1003,16 +1174,14 @@ def validate_assigned_roles(raw_table_data, original_raw_table):
                 if prv_a != exp:
                     rule_warnings.append(f"{d+1}日の{staff_names[s]}さんが{curr_a}ですが、前日が{prv_a}になっています。")
 
-    # 3. 手動固定の無視・上書き検証（致命的エラー）
     for s in range(staffs):
         for d in range(TARGET_DAYS):
             is_fixed, req_val = is_explicit_fixed(staff_names[s], d+1)
             if is_fixed and req_val in ['早①', '早②', '早③', '遅①', '遅②', '遅③', 'A夜', 'B夜', 'A明', 'B明']:
                 actual = raw_table_data[s][d]
-                if actual != req_val:
+                if actual != req_val and '?' not in actual:
                     fatal_errors.append(f"{d+1}日の{staff_names[s]}さんの手動指定「{req_val}」が無視され「{actual}」に変更されています。指定が矛盾しています。")
 
-    # 4. 内部計算との一致検証（致命的エラー）
     for s in range(staffs):
         for d in range(TARGET_DAYS):
             assigned_val = raw_table_data[s][d].replace('?', '')
@@ -1704,7 +1873,9 @@ if st.session_state.assigned_result is not None:
         if assign_warnings:
             unique_warnings = list(dict.fromkeys(assign_warnings))
             with st.expander("⚠️ 番号・アルファベットの割り当てに関する警告（シフトの人数不整合等）", expanded=True):
-                for w in unique_warnings: st.warning(w)
+                st.caption("デバッグモード等で人数制約が緩和されたことによる不整合です。制約違反を含む診断用のシフト表として出力されています。")
+                for w in unique_warnings:
+                    st.warning(w)
         if diag_df is not None and not diag_df.empty:
             with st.expander("🔍 診断結果の詳細を見る（制約違反・連勤オーバーの理由など）", expanded=True):
                 st.dataframe(diag_df, use_container_width=True)
@@ -1723,7 +1894,13 @@ if st.session_state.assigned_result is not None:
     
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
+        
+        # ★追加機能：正式な完成シフトの場合のみ、先頭に「掲示用A3」シートを追加
+        if not is_diagnostic:
+            add_a3_print_sheet(writer, result_df, staff_names, target_year, target_month, TARGET_DAYS, comm_res_df, changes_df)
+
         styled_result.to_excel(writer, sheet_name=result_sheet_name)
+        
         if is_diagnostic and diag_df is not None and not diag_df.empty:
             diag_df.to_excel(writer, sheet_name='診断結果', index=False)
         if not comm_res_df.empty:
@@ -1737,6 +1914,7 @@ if st.session_state.assigned_result is not None:
         edited_personal_lock_df.to_excel(writer, sheet_name='個別期間ロック設定', index=False)
         save_req_df.to_excel(writer, sheet_name='希望休入力')
         apply_excel_dropdowns(writer, staffs, TARGET_DAYS)
+        
     excel_data = output.getvalue()
     
     st.download_button(
