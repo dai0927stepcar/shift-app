@@ -1,6 +1,7 @@
 import io
 import calendar
 import datetime
+import random
 import pandas as pd
 import streamlit as st
 from ortools.sat.python import cp_model
@@ -40,10 +41,19 @@ shift_str = {
     S_HAYA: '早', S_Q: 'Q', S_OSO: '遅', S_IRI: '入', 
     S_AKE: '明', S_YASU: '休', S_YUKU: '有給', S_KEN: '研修', S_FREE: 'フリー', S_OJT: 'OJT'
 }
-str_to_shift = {v: k for k, v in shift_str.items()}
-str_to_shift['希望休'] = S_YASU
 
-shift_options = ["", "早", "Q", "遅", "入", "明", "希望休", "休", "有給", "研修", "OJT", "フリー"]
+# 内部計算のために、すべての表記バリエーションを同じシフトIDにマッピングする
+str_to_shift = {
+    '早': S_HAYA, '早①': S_HAYA, '早②': S_HAYA, '早③': S_HAYA,
+    'Q': S_Q,
+    '遅': S_OSO, '遅①': S_OSO, '遅②': S_OSO, '遅③': S_OSO,
+    '入': S_IRI, 'A夜勤': S_IRI, 'B夜勤': S_IRI,
+    '明': S_AKE,
+    '休': S_YASU, '希望休': S_YASU,
+    '有給': S_YUKU, '研修': S_KEN, 'フリー': S_FREE, 'OJT': S_OJT
+}
+
+shift_options = ["", "早①", "早②", "早③", "早", "Q", "遅①", "遅②", "遅③", "遅", "A夜勤", "B夜勤", "入", "明", "希望休", "休", "有給", "研修", "OJT", "フリー"]
 limit_options = ["制限なし"] + [str(i) for i in range(0, 32)]
 prev_work_options = [str(i) for i in range(0, 6)]
 PREV_COL = "前月連勤"
@@ -73,7 +83,8 @@ def extract_day_num(col_name):
     return int(s) if s.isdigit() else None
 
 def apply_excel_dropdowns(writer, staffs_count, target_days):
-    shift_list = '"早,Q,遅,入,明,希望休,休,有給,研修,OJT,フリー"'
+    # プルダウンの選択肢に新しい勤務区分を追加
+    shift_list = '"早①,早②,早③,早,Q,遅①,遅②,遅③,遅,A夜勤,B夜勤,入,明,希望休,休,有給,研修,OJT,フリー"'
     
     if '希望休入力' in writer.sheets:
         ws_req = writer.sheets['希望休入力']
@@ -438,7 +449,8 @@ def get_committees():
                     members.append(s_idx)
             
             target_shifts = []
-            for s_name_part in shifts_str.replace("、", ",").split(","):
+            parsed_shifts = shifts_str.replace("、", ",").replace("・", ",").replace(" ", ",").replace(" ", ",")
+            for s_name_part in parsed_shifts.split(","):
                 sn = s_name_part.strip()
                 if sn in str_to_shift:
                     target_shifts.append(str_to_shift[sn])
@@ -505,17 +517,79 @@ def get_ng_pairs():
                 pairs.append((idx1, idx2, f"{n1}さんと{n2}さんの同日「入」禁止"))
     return pairs
 
+# ★追加：最適化完了後の生シフトデータに対して、日ごとに重複しない番号をランダムに割り振る関数
+def assign_role_names(raw_table_data, req_df):
+    warnings = []
+    for d_idx in range(TARGET_DAYS):
+        d = d_idx + 1
+        
+        haya_staffs = []
+        oso_staffs = []
+        iri_staffs = []
+        
+        for s_idx in range(staffs):
+            if raw_table_data[s_idx][d_idx] == '早': haya_staffs.append(s_idx)
+            elif raw_table_data[s_idx][d_idx] == '遅': oso_staffs.append(s_idx)
+            elif raw_table_data[s_idx][d_idx] == '入': iri_staffs.append(s_idx)
+            
+        def assign_roles(staff_list, available_roles, base_role):
+            assigned = {}
+            avail = available_roles.copy()
+            
+            unassigned = []
+            for s_idx in staff_list:
+                # ユーザーが画面で意図的に番号（早②など）を指定していた場合は、その番号を優先して割り当てる
+                req_val = str(req_df.loc[staff_names[s_idx], str(d)]).strip() if str(d) in req_df.columns else ""
+                if req_val in avail:
+                    assigned[s_idx] = req_val
+                    avail.remove(req_val)
+                else:
+                    unassigned.append(s_idx)
+            
+            # 残りのスタッフに、余っている番号をランダムに割り当てる
+            random.shuffle(unassigned)
+            for s_idx in unassigned:
+                if avail:
+                    assigned[s_idx] = avail.pop(0)
+                else:
+                    assigned[s_idx] = base_role # 制約緩和などで人数が溢れている場合は番号なしを割り当てる
+            return assigned
+
+        if len(haya_staffs) != 3:
+            warnings.append(f"{d}日の早番が{len(haya_staffs)}名です（通常3名）。一部に番号が付与されていません。")
+        assigned_haya = assign_roles(haya_staffs, ['早①', '早②', '早③'], '早')
+        for s, r in assigned_haya.items(): raw_table_data[s][d_idx] = r
+
+        if len(oso_staffs) != 3:
+            warnings.append(f"{d}日の遅番が{len(oso_staffs)}名です（通常3名）。一部に番号が付与されていません。")
+        assigned_oso = assign_roles(oso_staffs, ['遅①', '遅②', '遅③'], '遅')
+        for s, r in assigned_oso.items(): raw_table_data[s][d_idx] = r
+
+        if len(iri_staffs) != 2:
+            warnings.append(f"{d}日の夜勤入りが{len(iri_staffs)}名です（通常2名）。一部にアルファベットが付与されていません。")
+        assigned_iri = assign_roles(iri_staffs, ['A夜勤', 'B夜勤'], '入')
+        for s, r in assigned_iri.items(): raw_table_data[s][d_idx] = r
+
+    return warnings
+
 def format_result_df(raw_table_data):
     for s_idx, d_idx in KIBOU_YASU_CELLS:
         if 0 <= s_idx < len(raw_table_data) and 0 <= d_idx < TARGET_DAYS:
             if raw_table_data[s_idx][d_idx] == '休': raw_table_data[s_idx][d_idx] = '希望休'
     cols = [day_labels[i] for i in range(1, TARGET_DAYS + 1)]
     df = pd.DataFrame(raw_table_data, index=staff_names, columns=cols)
-    df["【早】"], df["【Q】"], df["【遅】"], df["【入】"], df["【明】"] = (df[cols] == "早").sum(axis=1), (df[cols] == "Q").sum(axis=1), (df[cols] == "遅").sum(axis=1), (df[cols] == "入").sum(axis=1), (df[cols] == "明").sum(axis=1)
-    df["【休計】"], df["【有給】"] = ((df[cols] == "休") | (df[cols] == "希望休")).sum(axis=1), (df[cols] == "有給").sum(axis=1)
-    if (df[cols] == "研修").any().any(): df["【研修】"] = (df[cols] == "研修").sum(axis=1)
-    if (df[cols] == "OJT").any().any(): df["【OJT】"] = (df[cols] == "OJT").sum(axis=1)
-    if (df[cols] == "フリー").any().any(): df["【フリー】"] = (df[cols] == "フリー").sum(axis=1)
+    
+    # ★修正：番号付きの勤務も、従来通りの集計枠にカウントされるように変更
+    df["【早】"] = df[cols].isin(["早", "早①", "早②", "早③"]).sum(axis=1)
+    df["【Q】"] = (df[cols] == "Q").sum(axis=1)
+    df["【遅】"] = df[cols].isin(["遅", "遅①", "遅②", "遅③"]).sum(axis=1)
+    df["【入】"] = df[cols].isin(["入", "A夜勤", "B夜勤"]).sum(axis=1)
+    df["【明】"] = (df[cols] == "明").sum(axis=1)
+    df["【休計】"] = df[cols].isin(["休", "希望休"]).sum(axis=1)
+    df["【有給】"] = (df[cols] == "有給").sum(axis=1)
+    if df[cols].isin(["研修"]).any().any(): df["【研修】"] = (df[cols] == "研修").sum(axis=1)
+    if df[cols].isin(["OJT"]).any().any(): df["【OJT】"] = (df[cols] == "OJT").sum(axis=1)
+    if df[cols].isin(["フリー"]).any().any(): df["【フリー】"] = (df[cols] == "フリー").sum(axis=1)
     return df
 
 def style_shift_df(df):
@@ -668,7 +742,11 @@ def run_normal_mode():
         else:
             st.warning(f"⚠️ 基本の4連勤ルールでは条件が厳しすぎたため、一部ルールを緩和（【{used_step}】を適用）して作成しました。")
             
-        res_df = format_result_df([[shift_str[next(t for t in range(10) if solver.Value(B[s, d, t]))] for d in range(TARGET_DAYS)] for s in range(staffs)])
+        raw_table = [[shift_str[next(t for t in range(10) if solver.Value(B[s, d, t]))] for d in range(TARGET_DAYS)] for s in range(staffs)]
+        
+        # ★追加：計算結果の生データに対して、各日の番号・アルファベットを割り振る
+        warnings = assign_role_names(raw_table, edited_req_df)
+        res_df = format_result_df(raw_table)
         
         comm_records = []
         rename_dict = {}
@@ -682,6 +760,7 @@ def run_normal_mode():
                     for t in t_shifts:
                         if solver.Value(B[s, d, t]):
                             cnt += 1
+                            # 委員会対象者の表示は内部区分名（早、遅等）のまま出力します
                             att_names.append(f"{staff_names[s]}({shift_str[t]})")
                 if cnt >= req_count:
                     met_day = d + 1
@@ -691,19 +770,16 @@ def run_normal_mode():
             if met_day is not None:
                 day_str = day_labels[met_day]
                 comm_records.append({"委員会名": c_name, "実施日": day_str, "参加対象者": "、".join(attendees)})
-                # ★修正箇所：改行 \n をやめてスペースに変更し、確実に1行で表示されるようにしました
                 if day_str in rename_dict:
-                    rename_dict[day_str] = rename_dict[day_str] + f"・{c_name}"
+                    rename_dict[day_str] = rename_dict[day_str] + f" ★{c_name}"
                 else:
                     rename_dict[day_str] = f"{day_str} ★{c_name}"
             else:
                 comm_records.append({"委員会名": c_name, "実施日": "⚠️ 条件を満たす日がありません", "参加対象者": "-"})
         comm_res_df = pd.DataFrame(comm_records)
-
-        # ★追加：シフト表の列タイトル（日付）に委員会名を上書き
         res_df = res_df.rename(columns=rename_dict)
 
-        return res_df, pd.DataFrame(), comm_res_df
+        return res_df, pd.DataFrame(), comm_res_df, warnings
     else:
         st.error("❌ 条件が厳しすぎます。原因調査モードへ移行します...")
         return run_debug_mode()
@@ -854,6 +930,8 @@ def run_reschedule_mode():
 
     if status in [cp_model.OPTIMAL, cp_model.FEASIBLE]:
         raw_table = [[shift_str[next(t for t in range(10) if solver.Value(B[s, d, t]))] for d in range(TARGET_DAYS)] for s in range(staffs)]
+        
+        warnings = assign_role_names(raw_table, edited_req_df)
         result_df = format_result_df(raw_table)
 
         ui_changes = []
@@ -906,19 +984,16 @@ def run_reschedule_mode():
             if met_day is not None:
                 day_str = day_labels[met_day]
                 comm_records.append({"委員会名": c_name, "実施日": day_str, "参加対象者": "、".join(attendees)})
-                # ★修正箇所：改行 \n をやめてスペースに変更し、確実に1行で表示されるようにしました
                 if day_str in rename_dict:
-                    rename_dict[day_str] = rename_dict[day_str] + f"・{c_name}"
+                    rename_dict[day_str] = rename_dict[day_str] + f" ★{c_name}"
                 else:
                     rename_dict[day_str] = f"{day_str} ★{c_name}"
             else:
                 comm_records.append({"委員会名": c_name, "実施日": "⚠️ 条件を満たす日がありません", "参加対象者": "-"})
         comm_res_df = pd.DataFrame(comm_records)
-
-        # ★追加：シフト表の列タイトル（日付）に委員会名を上書き
         result_df = result_df.rename(columns=rename_dict)
 
-        return result_df, changes_df, comm_res_df
+        return result_df, changes_df, comm_res_df, warnings
     else:
         st.error("❌ 最小変更モードでは組めませんでした。原因調査モードへ移行します...")
         return run_debug_mode()
@@ -1038,7 +1113,9 @@ def run_debug_mode():
             for rule in broken_rules: st.write(f"・ {rule}")
         raw_table = [[shift_str[next(t for t in range(10) if solver.Value(B[s, d, t]))] for d in range(TARGET_DAYS)] for s in range(staffs)]
         
+        warnings = assign_role_names(raw_table, edited_req_df)
         result_df = format_result_df(raw_table)
+        
         comm_records = []
         rename_dict = {}
         for c_idx, (c_name, members, t_shifts, req_count) in enumerate(COMMITTEES):
@@ -1060,9 +1137,8 @@ def run_debug_mode():
             if met_day is not None:
                 day_str = day_labels[met_day]
                 comm_records.append({"委員会名": c_name, "実施日": day_str, "参加対象者": "、".join(attendees)})
-                # ★修正箇所：改行 \n をやめてスペースに変更
                 if day_str in rename_dict:
-                    rename_dict[day_str] = rename_dict[day_str] + f"・{c_name}"
+                    rename_dict[day_str] = rename_dict[day_str] + f" ★{c_name}"
                 else:
                     rename_dict[day_str] = f"{day_str} ★{c_name}"
             else:
@@ -1070,10 +1146,10 @@ def run_debug_mode():
         comm_res_df = pd.DataFrame(comm_records)
         result_df = result_df.rename(columns=rename_dict)
         
-        return result_df, pd.DataFrame(), comm_res_df
+        return result_df, pd.DataFrame(), comm_res_df, warnings
     else:
         st.error("指定自体が矛盾しています。")
-        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), []
 
 # =====================================================================
 # 3. 実行ボタンと結果出力
@@ -1083,11 +1159,17 @@ btn_label = "🛠️ 最小変更でシフトを再作成する（欠勤フォ�
 
 if st.button(btn_label, type="primary", use_container_width=True):
     if check_shortage():
-        if "通常作成" in mode: result_df, changes_df, comm_res_df = run_normal_mode()
-        elif "欠勤フォロー" in mode: result_df, changes_df, comm_res_df = run_reschedule_mode()
-        else: result_df, changes_df, comm_res_df = run_debug_mode()
+        if "通常作成" in mode: result_df, changes_df, comm_res_df, warnings = run_normal_mode()
+        elif "欠勤フォロー" in mode: result_df, changes_df, comm_res_df, warnings = run_reschedule_mode()
+        else: result_df, changes_df, comm_res_df, warnings = run_debug_mode()
             
         if not result_df.empty:
+            
+            if warnings:
+                unique_warnings = list(dict.fromkeys(warnings))
+                with st.expander("⚠️ 番号割り当てに関する警告（シフトの人数不整合）", expanded=True):
+                    for w in unique_warnings:
+                        st.warning(w)
             
             if not comm_res_df.empty:
                 st.markdown("### 📋 AIが決定した委員会・グループ日程")
@@ -1095,7 +1177,6 @@ if st.button(btn_label, type="primary", use_container_width=True):
                 st.divider()
 
             styled_result = style_shift_df(result_df)
-            # ★修正箇所：列の横幅に余裕を持たせて、文字が隠れないように変更
             st.dataframe(styled_result, use_container_width=False, width=2000, height=min(620, 65 + staffs * 35))
             
             output = io.BytesIO()
