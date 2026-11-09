@@ -14,18 +14,9 @@ st.set_page_config(page_title="シフト自動作成システム", layout="wide"
 st.title("📅 シフト自動作成システム")
 
 # =====================================================================
-# 🔒 パスワードロック機能（公開向けセキュリティ対応）
+# 🔒 ログイン機能（試験用簡易版）
 # =====================================================================
-try:
-    PASSWORD = st.secrets["APP_PASSWORD"]
-except Exception:
-    st.error("⚠️ **【セキュリティエラー】**\n\n"
-             "本番環境用のパスワードが設定されていません。\n"
-             "不正アクセスを防止するため、システムの起動を停止しました。\n\n"
-             "**[管理者の方へ]**\n"
-             "`.streamlit/secrets.toml` ファイルを作成し、以下のようにパスワードを設定してください。\n"
-             "```toml\nAPP_PASSWORD = \"任意の強固なパスワード\"\n```")
-    st.stop()
+PASSWORD = "0927"
 
 if "authenticated" not in st.session_state:
     st.session_state.authenticated = False
@@ -33,6 +24,7 @@ if "authenticated" not in st.session_state:
 if not st.session_state.authenticated:
     st.subheader("ログイン")
     pwd = st.text_input("🔒 パスワードを入力してください", type="password")
+    
     if st.button("ログイン", type="primary"):
         if pwd == PASSWORD:
             st.session_state.authenticated = True
@@ -51,18 +43,18 @@ shift_str = {
     S_AKE: '明', S_YASU: '休', S_YUKU: '有給', S_KEN: '研修', S_FREE: 'フリー', S_OJT: 'OJT'
 }
 
-# 内部計算のためにすべての表記を同じシフトIDにマッピング（旧表記は互換性維持のため残存）
+# 内部計算のためにすべての表記を同じシフトIDにマッピング（単独表記などは読み込み互換用）
 str_to_shift = {
     '早': S_HAYA, '早①': S_HAYA, '早②': S_HAYA, '早③': S_HAYA,
     'Q': S_Q,
     '遅': S_OSO, '遅①': S_OSO, '遅②': S_OSO, '遅③': S_OSO,
-    '入': S_IRI, 'A夜': S_IRI, 'B夜': S_IRI,
+    '入': S_IRI, 'A夜': S_IRI, 'B夜': S_IRI, 'A夜勤': S_IRI, 'B夜勤': S_IRI,
     '明': S_AKE, 'A明': S_AKE, 'B明': S_AKE,
     '休': S_YASU, '希望休': S_YASU,
     '有給': S_YUKU, '研修': S_KEN, 'フリー': S_FREE, 'OJT': S_OJT
 }
 
-# 新規作成・プルダウン用（旧表記なし）
+# 新規作成・プルダウン用（単独表記なし）
 shift_options = ["", "早①", "早②", "早③", "Q", "遅①", "遅②", "遅③", "A夜", "B夜", "A明", "B明", "希望休", "休", "有給", "研修", "OJT", "フリー"]
 allowed_shifts = set(shift_options)
 
@@ -130,7 +122,6 @@ if "editor_key" not in st.session_state: st.session_state.editor_key = 0
 if "setting_year" not in st.session_state: st.session_state.setting_year = now.year
 if "setting_month" not in st.session_state: st.session_state.setting_month = now.month
 
-# 日数は常にカレンダーから自動計算
 _, auto_d = calendar.monthrange(st.session_state.setting_year, st.session_state.setting_month)
 st.session_state.setting_days = auto_d
 
@@ -146,6 +137,7 @@ if "staff_names" not in st.session_state: st.session_state.staff_names = DEFAULT
 if "assigned_result" not in st.session_state: st.session_state.assigned_result = None
 if "assigned_comm" not in st.session_state: st.session_state.assigned_comm = None
 if "assigned_changes" not in st.session_state: st.session_state.assigned_changes = None
+if "assigned_warnings" not in st.session_state: st.session_state.assigned_warnings = None
 if "assigned_diag" not in st.session_state: st.session_state.assigned_diag = None
 if "last_calc_hash" not in st.session_state: st.session_state.last_calc_hash = ""
 if "last_executed_mode" not in st.session_state: st.session_state.last_executed_mode = ""
@@ -185,34 +177,53 @@ def get_state_hash():
     return hashlib.sha256(s.encode('utf-8')).hexdigest()
 
 # =====================================================================
-# 職員名の同期機能（名前が変わっても別人にコピーされない安全な処理）
+# ★変更：職員名と個人条件の同期（行ID追跡・キャッシュ保護付き）
 # =====================================================================
-def sync_staff_names(new_names):
+def sync_data_editor_state(edited_df):
+    new_names = [str(n).strip() for n in edited_df["スタッフ名"] if str(n).strip()]
+    
+    if len(new_names) == 0:
+        return False, "❌ スタッフ名が1件も登録されていません。"
     if len(new_names) != len(set(new_names)):
         return False, "❌ スタッフ名が重複しています。別々の名前に変更してください。"
     
-    if new_names != st.session_state.staff_names:
-        old_req = st.session_state.req_df
-        new_req = pd.DataFrame("", index=new_names, columns=old_req.columns)
-        new_req[PREV_COL] = "0"
-        for name in new_names:
-            if name in old_req.index:
-                new_req.loc[name] = old_req.loc[name]
-        st.session_state.req_df = new_req
-        st.session_state.staff_names = new_names
-        
-        # 名前が変わった場合は基準シフトの互換性も失われるためリセットする
-        if st.session_state.base_schedule_df is not None:
-            if set(new_names) != set(st.session_state.base_schedule_df.index):
-                st.session_state.base_schedule_df = None
-                
-        st.session_state.editor_key += 1
-        st.session_state.assigned_result = None
+    # 完全に同じDataFrameなら何もせず正常終了
+    if edited_df.equals(st.session_state.staff_df):
         return True, ""
-    return False, ""
+        
+    old_req = st.session_state.req_df
+    old_staff = st.session_state.staff_df
+    
+    new_req = pd.DataFrame("", index=new_names, columns=old_req.columns)
+    new_req[PREV_COL] = "0"
+    
+    for new_idx, row in edited_df.iterrows():
+        new_name = str(row["スタッフ名"]).strip()
+        
+        # 行のインデックス（変更前と変更後）で対応関係を追跡し、希望休を引継ぐ
+        if new_idx in old_staff.index:
+            old_name = str(old_staff.loc[new_idx, "スタッフ名"]).strip()
+            if old_name in old_req.index:
+                new_req.loc[new_name] = old_req.loc[old_name]
+        else:
+            # 新規追加の行（または対応不明）
+            pass
+            
+    st.session_state.req_df = new_req
+    st.session_state.staff_df = edited_df.copy()
+    st.session_state.staff_names = new_names
+    
+    # 名前リストが変わった場合は欠勤フォローの基準シフトを破棄する
+    if st.session_state.base_schedule_df is not None:
+        if set(new_names) != set(st.session_state.base_schedule_df.index):
+            st.session_state.base_schedule_df = None
+            
+    # 個人条件や名前が変わったのでキャッシュは無効化する
+    st.session_state.assigned_result = None
+    return True, ""
 
 # =====================================================================
-# Excel検証と一括読み込み（トランザクション処理）
+# ★変更：Excel検証と一括読み込み（トランザクション・完全排除）
 # =====================================================================
 def verify_and_load_excel(xls_file, is_base_schedule=False):
     errors = []
@@ -223,36 +234,56 @@ def verify_and_load_excel(xls_file, is_base_schedule=False):
         
     temp_state = {}
     
+    # --- 1. 基本設定シートの検証 ---
     if "基本設定" not in xls.sheet_names:
         errors.append("「基本設定」シートが存在しません。")
     else:
         df_set = pd.read_excel(xls, "基本設定")
-        settings = dict(zip(df_set["設定項目"].astype(str), df_set["設定値"]))
-        try:
-            y_val = int(float(settings.get("対象年", now.year)))
-            m_val = int(float(settings.get("対象月", now.month)))
-            d_val = int(float(settings.get("月の日数", 31)))
-            yasu_val = int(float(settings.get("休の日数", 9)))
-            q_raw = str(settings.get("Qを配置しない日", ""))
-            q_days_val = [] if not q_raw or q_raw.lower()=="nan" or q_raw=="なし" else [int(x.strip().split(".")[0]) for x in q_raw.split(",") if x.strip().split(".")[0].isdigit()]
+        if "設定項目" not in df_set.columns or "設定値" not in df_set.columns:
+            errors.append("「基本設定」シートに必須列（設定項目、設定値）が存在しません。")
+        else:
+            settings = dict(zip(df_set["設定項目"].astype(str), df_set["設定値"]))
             
-            if not (2000 <= y_val <= 2100): errors.append("対象年が有効な範囲外です。")
-            if not (1 <= m_val <= 12): errors.append("対象月が1〜12の範囲外です。")
+            raw_y = str(settings.get("対象年", "")).strip()
+            raw_m = str(settings.get("対象月", "")).strip()
+            raw_d = str(settings.get("月の日数", "")).strip()
             
-            if not errors:
-                _, cal_days = calendar.monthrange(y_val, m_val)
-                if d_val != cal_days:
-                    errors.append(f"設定された対象月（{y_val}年{m_val}月）の日数（{d_val}日）が実際のカレンダー（{cal_days}日）と一致しません。")
+            def is_valid_int(val_str):
+                try:
+                    v = float(val_str)
+                    return v.is_integer()
+                except:
+                    return False
+            
+            if not (is_valid_int(raw_y) and is_valid_int(raw_m) and is_valid_int(raw_d)):
+                errors.append("基本設定の年・月・日数は整数で指定してください。小数は使用できません。")
+            else:
+                y_val = int(float(raw_y))
+                m_val = int(float(raw_m))
+                d_val = int(float(raw_d))
                 
-            temp_state['year'] = y_val
-            temp_state['month'] = m_val
-            temp_state['days'] = cal_days if not errors else 31
-            temp_state['yasu'] = yasu_val
-            temp_state['q_days'] = q_days_val
-            
-        except ValueError:
-            errors.append("基本設定シートの数値の読み取りに失敗しました。")
+                if not (2024 <= y_val <= 2035): errors.append(f"対象年（{y_val}）は2024〜2035年の範囲で指定してください。")
+                if not (1 <= m_val <= 12): errors.append(f"対象月（{m_val}）は1〜12の範囲で指定してください。")
+                
+                if not errors:
+                    _, cal_days = calendar.monthrange(y_val, m_val)
+                    if d_val != cal_days:
+                        errors.append(f"設定された対象年月（{y_val}年{m_val}月）の日数（{d_val}日）が実際のカレンダー（{cal_days}日）と一致しません。")
+                    
+                temp_state['year'] = y_val
+                temp_state['month'] = m_val
+                temp_state['days'] = cal_days if not errors else 31
+                
+                yasu_val = settings.get("休の日数", "")
+                if is_valid_int(yasu_val):
+                    temp_state['yasu'] = int(float(yasu_val))
+                else:
+                    errors.append("休の日数が不正です。")
+                
+                q_raw = str(settings.get("Qを配置しない日", ""))
+                temp_state['q_days'] = [] if not q_raw or q_raw.lower()=="nan" or q_raw=="なし" else [int(x.strip().split(".")[0]) for x in q_raw.split(",") if x.strip().split(".")[0].isdigit()]
 
+    # --- 2. スタッフ設定シートの検証 ---
     if "スタッフ設定" not in xls.sheet_names:
         errors.append("「スタッフ設定」シートが存在しません。")
     else:
@@ -263,7 +294,7 @@ def verify_and_load_excel(xls_file, is_base_schedule=False):
             names = [n.strip() for n in df_staff["スタッフ名"] if n.strip()]
             if not names:
                 errors.append("スタッフ名が1件も登録されていません。")
-            if len(names) != len(set(names)):
+            elif len(names) != len(set(names)):
                 errors.append("スタッフ名に重複があります。同名の場合は番号等を付けて一意にしてください。")
             
             if "属性1" not in df_staff.columns: df_staff["属性1"] = ""
@@ -273,9 +304,10 @@ def verify_and_load_excel(xls_file, is_base_schedule=False):
             temp_state['staff_df'] = df_staff
             temp_state['staff_names'] = names
 
+    # --- 3. 勤務表シートの検証（希望休入力・完成シフト表） ---
     if "希望休入力" not in xls.sheet_names:
-        errors.append("「希望休入力」シートが存在しません（前月連勤の読み取りに必要です）。")
-
+        errors.append("「希望休入力」シートが存在しません（前月連勤の取得に必須です）。")
+        
     target_sheet = "完成シフト表" if is_base_schedule else "希望休入力"
     if is_base_schedule and target_sheet not in xls.sheet_names:
         errors.append(f"「{target_sheet}」シートが存在しません。")
@@ -288,13 +320,13 @@ def verify_and_load_excel(xls_file, is_base_schedule=False):
         target_names = [str(n).strip() for n in df_target_sheet.index if str(n).strip()]
         
         if set(req_names) != set(temp_state['staff_names']):
-            errors.append(f"「希望休入力」の職員名と「スタッフ設定」の職員名が一致しません。")
+            errors.append(f"「希望休入力」の職員名と「スタッフ設定」の職員名が完全に一致しません。")
         if is_base_schedule and set(target_names) != set(temp_state['staff_names']):
-            errors.append(f"「完成シフト表」の職員名と「スタッフ設定」の職員名が一致しません。")
+            errors.append(f"「完成シフト表」の職員名と「スタッフ設定」の職員名が完全に一致しません。")
             
         norm_cols = [PREV_COL] + [str(i) for i in range(1, temp_state['days'] + 1)]
         
-        # 必須列（前月連勤）は希望休シートから探す
+        # 前月連勤は希望休シートから探す
         req_prev_col = None
         for col in df_req_sheet.columns:
             if str(col).strip() == PREV_COL: req_prev_col = col
@@ -319,25 +351,34 @@ def verify_and_load_excel(xls_file, is_base_schedule=False):
             normalized_base = pd.DataFrame("", index=temp_state['staff_names'], columns=norm_cols) if is_base_schedule else None
             
             for s_name in temp_state['staff_names']:
-                v_prev = str(df_req_sheet.loc[s_name, req_prev_col]).strip()
-                if v_prev.isdigit() and 0 <= int(v_prev) <= 5:
-                    normalized_req.loc[s_name, PREV_COL] = str(int(v_prev))
-                    if is_base_schedule: normalized_base.loc[s_name, PREV_COL] = str(int(v_prev))
-                else:
+                v_prev = str(df_req_sheet.loc[s_name, req_prev_col]).strip() if s_name in df_req_sheet.index else ""
+                
+                is_valid_prev = False
+                try:
+                    vf = float(v_prev)
+                    if vf.is_integer() and 0 <= int(vf) <= 5:
+                        normalized_req.loc[s_name, PREV_COL] = str(int(vf))
+                        if is_base_schedule: normalized_base.loc[s_name, PREV_COL] = str(int(vf))
+                        is_valid_prev = True
+                except:
+                    pass
+                if not is_valid_prev:
                     errors.append(f"{s_name}さんの前月連勤の値「{v_prev}」が不正です。0〜5の整数を指定してください。")
                     
                 for d in range(1, temp_state['days'] + 1):
-                    # req_df 用の値
-                    req_val = str(df_req_sheet.loc[s_name, extracted_t_cols[str(d)]] if not is_base_schedule else df_target_sheet.loc[s_name, extracted_t_cols[str(d)]]).strip()
-                    if req_val and req_val not in allowed_shifts:
-                        errors.append(f"{target_sheet}：{s_name}さんの{d}日の入力値「{req_val}」は不正な勤務区分です（旧表記は使用不可）。")
-                    normalized_req.loc[s_name, str(d)] = req_val
+                    col_key = extracted_t_cols[str(d)]
                     
-                    # base_schedule_df 用の値（欠勤フォロー時）
-                    if is_base_schedule:
-                        base_val = str(df_target_sheet.loc[s_name, extracted_t_cols[str(d)]]).strip()
+                    if not is_base_schedule:
+                        req_val = str(df_req_sheet.loc[s_name, col_key]).strip() if s_name in df_req_sheet.index and col_key in df_req_sheet.columns else ""
+                        if req_val and req_val not in allowed_shifts:
+                            errors.append(f"希望休入力：{s_name}さんの{d}日の入力値「{req_val}」は不正な勤務区分です（旧表記は使用不可）。")
+                        normalized_req.loc[s_name, str(d)] = req_val
+                    else:
+                        # 欠勤フォロー時：req_dfにも「完成シフト結果」を入れる
+                        base_val = str(df_target_sheet.loc[s_name, col_key]).strip() if s_name in df_target_sheet.index else ""
                         if base_val and base_val not in allowed_shifts:
-                            errors.append(f"完成シフト表：{s_name}さんの{d}日の入力値「{base_val}」は不正な勤務区分です。")
+                            errors.append(f"完成シフト表：{s_name}さんの{d}日の結果「{base_val}」は不正な勤務区分です（旧表記を含むファイルは読み込めません）。")
+                        normalized_req.loc[s_name, str(d)] = base_val
                         normalized_base.loc[s_name, str(d)] = base_val
 
             temp_state['req_df'] = normalized_req
@@ -346,17 +387,27 @@ def verify_and_load_excel(xls_file, is_base_schedule=False):
             else:
                 temp_state['base_schedule_df'] = None
 
+    # --- 4. その他の設定シート ---
     if not errors:
         if "NGペア設定" in xls.sheet_names:
             df_ng = pd.read_excel(xls, "NGペア設定").fillna("").astype(str)
-            if "スタッフ1" in df_ng.columns and "スタッフ2" in df_ng.columns: temp_state['ng_pairs_df'] = df_ng[["スタッフ1", "スタッフ2"]]
+            if "スタッフ1" not in df_ng.columns or "スタッフ2" not in df_ng.columns:
+                errors.append("NGペア設定シートに必須列が存在しません。")
+            else:
+                temp_state['ng_pairs_df'] = df_ng[["スタッフ1", "スタッフ2"]]
+        
         if "個別期間ロック設定" in xls.sheet_names:
             df_pl = pd.read_excel(xls, "個別期間ロック設定").fillna("").astype(str)
-            if "スタッフ名" in df_pl.columns and "開始日" in df_pl.columns and "終了日" in df_pl.columns:
+            if "スタッフ名" not in df_pl.columns or "開始日" not in df_pl.columns or "終了日" not in df_pl.columns:
+                errors.append("個別期間ロック設定シートに必須列が存在しません。")
+            else:
                 temp_state['personal_lock_df'] = df_pl[["スタッフ名", "開始日", "終了日"]]
+                
         if "委員会設定" in xls.sheet_names:
             df_cm = pd.read_excel(xls, "委員会設定").fillna("").astype(str)
-            if "委員会名" in df_cm.columns and "対象シフト（例: 遅①,A明）" in df_cm.columns:
+            if "委員会名" not in df_cm.columns or "対象シフト（例: 遅①,A明）" not in df_cm.columns:
+                errors.append("委員会設定シートに必須列が存在しません。")
+            else:
                 temp_state['committee_df'] = df_cm[["委員会名", "対象シフト（例: 遅①,A明）"]]
 
     return errors, temp_state if not errors else None
@@ -508,15 +559,16 @@ with st.expander("👥 スタッフ名（個人名への書き換え）・シフ
         if st.button("名前を一括反映する", type="primary"):
             raw_list = [n.strip() for n in bulk_names_text.replace("、", "\n").replace(",", "\n").replace(" ", "\n").replace(" ", "\n").splitlines() if n.strip()]
             if raw_list:
-                is_ok, err_msg = sync_staff_names(raw_list)
+                new_staff_df = st.session_state.staff_df.copy()
+                for idx, new_name in enumerate(raw_list):
+                    if idx < len(new_staff_df): new_staff_df.loc[new_staff_df.index[idx], "スタッフ名"] = new_name
+                    else: new_staff_df = pd.concat([new_staff_df, pd.DataFrame([{"スタッフ名": new_name, "早の上限": "制限なし", "Qの上限": "制限なし", "遅の上限": "制限なし", "入の上限": "制限なし", "属性1": "", "属性2": ""}])], ignore_index=True)
+                
+                is_ok, err_msg = sync_data_editor_state(new_staff_df)
                 if not is_ok:
                     st.error(err_msg)
                 else:
-                    new_staff_df = st.session_state.staff_df.copy()
-                    for idx, new_name in enumerate(raw_list):
-                        if idx < len(new_staff_df): new_staff_df.loc[idx, "スタッフ名"] = new_name
-                        else: new_staff_df = pd.concat([new_staff_df, pd.DataFrame([{"スタッフ名": new_name, "早の上限": "制限なし", "Qの上限": "制限なし", "遅の上限": "制限なし", "入の上限": "制限なし", "属性1": "", "属性2": ""}])], ignore_index=True)
-                    st.session_state.staff_df = new_staff_df
+                    st.session_state.editor_key += 1
                     st.rerun()
 
     staff_col_config = {
@@ -530,14 +582,12 @@ with st.expander("👥 スタッフ名（個人名への書き換え）・シフ
     }
     edited_staff_df = st.data_editor(st.session_state.staff_df, column_config=staff_col_config, num_rows="dynamic", use_container_width=True, height=min(420, 65 + len(st.session_state.staff_df) * 35), key=f"staff_editor_{ek}")
 
-# data_editor 内で名前が変更・追加・削除された場合の安全な同期処理
-current_names_from_editor = [str(n).strip() for n in edited_staff_df["スタッフ名"] if str(n).strip()]
-if current_names_from_editor != st.session_state.staff_names:
-    is_ok, err_msg = sync_staff_names(current_names_from_editor)
+# data_editor の変更を無条件に捕捉して保存・キャッシュクリアを行う
+if not edited_staff_df.equals(st.session_state.staff_df):
+    is_ok, err_msg = sync_data_editor_state(edited_staff_df)
     if not is_ok:
         st.error(err_msg)
     else:
-        st.session_state.staff_df = edited_staff_df
         st.rerun()
 
 staff_names = st.session_state.staff_names
@@ -601,7 +651,6 @@ for i in range(1, TARGET_DAYS + 1):
 edited_req_df = st.data_editor(current_req_df, column_config=column_configuration, use_container_width=True, height=min(620, 65 + staffs * 35), key=f"req_editor_{ek}")
 st.session_state.req_df = edited_req_df
 
-# ★欠勤フォローモードで、基準シフトが存在しない場合はエラーを表示して計算をさせない
 if "欠勤フォロー" in mode and st.session_state.base_schedule_df is None:
     st.error("❌ 欠勤フォローモードを実行するための「基準となる完成シフト表」が設定されていません。左のメニューから現行の完成シフト表Excelを読み込んでください。")
 
@@ -680,7 +729,6 @@ def get_committees():
                 if sn in str_to_shift:
                     target_shifts.append(str_to_shift[sn])
             
-            # ★修正1：同じ勤務区分IDの重複登録を除去
             if members and target_shifts:
                 unique_shifts = list(dict.fromkeys(target_shifts))
                 req_count = len(members) // 2 + 1
@@ -716,7 +764,7 @@ for s_idx, s_name in enumerate(staff_names):
                 if d <= LOCK_UNTIL_DAY: SPECIFIC_SHIFTS[(s_idx, d)] = str_to_shift[val_str]
                 elif is_personal_locked: SPECIFIC_SHIFTS[(s_idx, d)] = str_to_shift[val_str]
                 elif orig_str != "" and val_str != orig_str: SPECIFIC_SHIFTS[(s_idx, d)] = str_to_shift[val_str]
-                elif val_str in ["希望休", "有給", "研修", "OJT", "フリー"]: SPECIFIC_SHIFTS[(s_idx, d)] = str_to_shift[val_str]
+                elif val_str in ["希望休", "休", "有給", "研修", "OJT", "フリー"]: SPECIFIC_SHIFTS[(s_idx, d)] = str_to_shift[val_str]
 
 def get_personal_limits():
     limits = []
@@ -766,34 +814,9 @@ def is_explicit_fixed(s_name, d):
         return True, req_val
 
 # =====================================================================
-# ★表示用役割名の割り当てと検証（旧表記完全排除版）
+# 表示用役割名の割り当て
 # =====================================================================
 def assign_role_names(raw_table_data, req_df):
-    fatal_errors = []
-    
-    for s in range(staffs):
-        for d in range(1, TARGET_DAYS):
-            is_f_iri, r_iri = is_explicit_fixed(staff_names[s], d)
-            is_f_ake, r_ake = is_explicit_fixed(staff_names[s], d+1)
-            iri_l = r_iri[0] if is_f_iri and r_iri in ['A夜', 'B夜'] else None
-            ake_l = r_ake[0] if is_f_ake and r_ake in ['A明', 'B明'] else None
-            if iri_l and ake_l and iri_l != ake_l:
-                fatal_errors.append(f"{staff_names[s]}さんの{d}日夜勤入り（{r_iri}）と翌日夜勤明け（{r_ake}）の固定指定が矛盾しています。")
-
-    ake_staffs_d1 = [s for s in range(staffs) if raw_table_data[s][0] == '明']
-    req_ake_counts = {'A明': [], 'B明': []}
-    for s in ake_staffs_d1:
-        is_f, req_val = is_explicit_fixed(staff_names[s], 1)
-        if is_f and req_val in req_ake_counts:
-            req_ake_counts[req_val].append(staff_names[s])
-    if len(req_ake_counts['A明']) > 1:
-        fatal_errors.append(f"1日の夜勤明けで「A明」の固定指定が重複しています（{', '.join(req_ake_counts['A明'])}）。")
-    if len(req_ake_counts['B明']) > 1:
-        fatal_errors.append(f"1日の夜勤明けで「B明」の固定指定が重複しています（{', '.join(req_ake_counts['B明'])}）。")
-
-    if fatal_errors:
-        return fatal_errors
-
     for d_idx in range(TARGET_DAYS):
         d = d_idx + 1
         
@@ -802,21 +825,17 @@ def assign_role_names(raw_table_data, req_df):
         iri_staffs  = [s for s in range(staffs) if raw_table_data[s][d_idx] == '入']
         ake_staffs  = [s for s in range(staffs) if raw_table_data[s][d_idx] == '明']
         
+        # 共通割り当て関数（優先順位：①明示固定 → ②維持（欠勤フォロー） → ③ランダム）
         def assign_roles(staff_list, available_roles, base_role, check_prev_maintain=False):
             assigned = {}
             avail = available_roles.copy()
             unassigned = []
-            req_set = set()
             
             for s in staff_list:
                 is_fixed, req_val = is_explicit_fixed(staff_names[s], d)
-                if is_fixed and req_val in available_roles:
-                    if req_val in req_set:
-                        fatal_errors.append(f"{d}日の{base_role}番で「{req_val}」の指定が重複しています。")
-                    else:
-                        req_set.add(req_val)
-                        assigned[s] = req_val
-                        avail.remove(req_val)
+                if is_fixed and req_val in avail:
+                    assigned[s] = req_val
+                    avail.remove(req_val)
                 else:
                     unassigned.append(s)
                     
@@ -838,16 +857,17 @@ def assign_role_names(raw_table_data, req_df):
 
             return assigned
 
+        # 早番・遅番の割り当て
         assigned_haya = assign_roles(haya_staffs, ['早①', '早②', '早③'], '早', check_prev_maintain=True)
         for s, r in assigned_haya.items(): raw_table_data[s][d_idx] = r
 
         assigned_oso = assign_roles(oso_staffs, ['遅①', '遅②', '遅③'], '遅', check_prev_maintain=True)
         for s, r in assigned_oso.items(): raw_table_data[s][d_idx] = r
 
+        # 夜勤入りの割り当て（翌日の明けの手動固定を先読みして確定させる）
         assigned_iri = {}
         avail_iri = ['A夜', 'B夜']
         unassigned_iri = []
-        req_iri_set = set()
 
         for s in iri_staffs:
             is_f_iri, req_val = is_explicit_fixed(staff_names[s], d)
@@ -860,14 +880,9 @@ def assign_role_names(raw_table_data, req_df):
             final_l = r_l or n_l
             req_iri_str = f"{final_l}夜" if final_l else None
 
-            if req_iri_str:
-                if req_iri_str in req_iri_set:
-                    fatal_errors.append(f"{d}日の夜勤入りで「{req_iri_str}」が重複して指定・推論されました。")
-                else:
-                    req_iri_set.add(req_iri_str)
-                    assigned_iri[s] = req_iri_str
-                    if req_iri_str in avail_iri:
-                        avail_iri.remove(req_iri_str)
+            if req_iri_str and req_iri_str in avail_iri:
+                assigned_iri[s] = req_iri_str
+                avail_iri.remove(req_iri_str)
             else:
                 unassigned_iri.append(s)
 
@@ -889,6 +904,7 @@ def assign_role_names(raw_table_data, req_df):
 
         for s, r in assigned_iri.items(): raw_table_data[s][d_idx] = r
 
+        # 夜勤明けの割り当て（必ず1日前の「実際の勤務区分」だけを踏襲する）
         assigned_ake = {}
         avail_ake = ['A明', 'B明']
         unassigned_ake = []
@@ -902,7 +918,6 @@ def assign_role_names(raw_table_data, req_df):
                 else:
                     unassigned_ake.append(s)
             else:
-                # ★修正4：夜勤明けのアルファベットは、必ず「前日の実際の勤務区分」だけを見て確定する
                 prev_shift = raw_table_data[s][d_idx - 1]
                 if prev_shift == 'A夜':
                     assigned_str = 'A明'
@@ -911,10 +926,9 @@ def assign_role_names(raw_table_data, req_df):
                 else:
                     assigned_str = None
                 
-                if assigned_str:
+                if assigned_str and assigned_str in avail_ake:
                     assigned_ake[s] = assigned_str
-                    if assigned_str in avail_ake:
-                        avail_ake.remove(assigned_str)
+                    avail_ake.remove(assigned_str)
                 else:
                     unassigned_ake.append(s)
 
@@ -940,12 +954,14 @@ def assign_role_names(raw_table_data, req_df):
                 
         for s, r in assigned_ake.items(): raw_table_data[s][d_idx] = r
 
-    return fatal_errors
-
+# =====================================================================
+# ★全日程の割り当て最終検証（デバッグモード等のルール違反と致命的矛盾の分離）
+# =====================================================================
 def validate_assigned_roles(raw_table_data, original_raw_table):
     fatal_errors = []
     rule_warnings = []
     
+    # 1. 人数と割り当て重複の検証（デバッグ用緩和の検知）
     for d_idx in range(TARGET_DAYS):
         d = d_idx + 1
         orig_shifts = [original_raw_table[s][d_idx] for s in range(staffs)]
@@ -961,20 +977,16 @@ def validate_assigned_roles(raw_table_data, original_raw_table):
         if i_cnt != 2: rule_warnings.append(f"{d}日の夜勤入りが{i_cnt}名です（通常2名）。")
         if a_cnt != 2: rule_warnings.append(f"{d}日の夜勤明けが{a_cnt}名です（通常2名）。")
         
-        for role in ['早①','早②','早③']:
-            if assigned_shifts.count(role) > 1: fatal_errors.append(f"{d}日で「{role}」の割り当てが重複しています。")
-        for role in ['遅①','遅②','遅③']:
-            if assigned_shifts.count(role) > 1: fatal_errors.append(f"{d}日で「{role}」の割り当てが重複しています。")
-        for role in ['A夜','B夜']:
-            if assigned_shifts.count(role) > 1: fatal_errors.append(f"{d}日で「{role}」の割り当てが重複しています。")
-        for role in ['A明','B明']:
-            if assigned_shifts.count(role) > 1: fatal_errors.append(f"{d}日で「{role}」の割り当てが重複しています。")
+        for role in ['早①','早②','早③', '遅①','遅②','遅③', 'A夜','B夜', 'A明','B明']:
+            if assigned_shifts.count(role) > 1:
+                fatal_errors.append(f"{d}日で「{role}」の割り当てが重複しています。")
             
         if any('?' in x for x in assigned_shifts):
             for s, x in enumerate(assigned_shifts):
                 if '?' in x:
                     rule_warnings.append(f"{d}日の{staff_names[s]}さんの「{x}」が未確定です。人数制約緩和や手動指定の矛盾が原因の可能性があります。")
 
+    # 2. 逆方向も含めた夜勤リレーの完全検証
     for s in range(staffs):
         for d in range(TARGET_DAYS - 1):
             curr_a = raw_table_data[s][d]
@@ -991,14 +1003,16 @@ def validate_assigned_roles(raw_table_data, original_raw_table):
                 if prv_a != exp:
                     rule_warnings.append(f"{d+1}日の{staff_names[s]}さんが{curr_a}ですが、前日が{prv_a}になっています。")
 
+    # 3. 手動固定の無視・上書き検証（致命的エラー）
     for s in range(staffs):
         for d in range(TARGET_DAYS):
             is_fixed, req_val = is_explicit_fixed(staff_names[s], d+1)
             if is_fixed and req_val in ['早①', '早②', '早③', '遅①', '遅②', '遅③', 'A夜', 'B夜', 'A明', 'B明']:
                 actual = raw_table_data[s][d]
                 if actual != req_val:
-                    fatal_errors.append(f"{d+1}日の{staff_names[s]}さんの手動指定「{req_val}」が無視され「{actual}」に変更されています。")
+                    fatal_errors.append(f"{d+1}日の{staff_names[s]}さんの手動指定「{req_val}」が無視され「{actual}」に変更されています。指定が矛盾しています。")
 
+    # 4. 内部計算との一致検証（致命的エラー）
     for s in range(staffs):
         for d in range(TARGET_DAYS):
             assigned_val = raw_table_data[s][d].replace('?', '')
@@ -1691,6 +1705,9 @@ if st.session_state.assigned_result is not None:
             unique_warnings = list(dict.fromkeys(assign_warnings))
             with st.expander("⚠️ 番号・アルファベットの割り当てに関する警告（シフトの人数不整合等）", expanded=True):
                 for w in unique_warnings: st.warning(w)
+        if diag_df is not None and not diag_df.empty:
+            with st.expander("🔍 診断結果の詳細を見る（制約違反・連勤オーバーの理由など）", expanded=True):
+                st.dataframe(diag_df, use_container_width=True)
     
     if not comm_res_df.empty:
         st.markdown("### 📋 AIが決定した委員会・グループ日程")
@@ -1707,7 +1724,7 @@ if st.session_state.assigned_result is not None:
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
         styled_result.to_excel(writer, sheet_name=result_sheet_name)
-        if is_diagnostic and not diag_df.empty:
+        if is_diagnostic and diag_df is not None and not diag_df.empty:
             diag_df.to_excel(writer, sheet_name='診断結果', index=False)
         if not comm_res_df.empty:
             comm_res_df.to_excel(writer, sheet_name='委員会日程表', index=False)
