@@ -42,18 +42,19 @@ shift_str = {
     S_AKE: '明', S_YASU: '休', S_YUKU: '有給', S_KEN: '研修', S_FREE: 'フリー', S_OJT: 'OJT'
 }
 
-# 内部計算のために、すべての表記バリエーションを同じシフトIDにマッピングする
+# 内部計算のために、すべての表記バリエーションを同じシフトIDにマッピングする（旧表記は読み込み互換用）
 str_to_shift = {
     '早': S_HAYA, '早①': S_HAYA, '早②': S_HAYA, '早③': S_HAYA,
     'Q': S_Q,
     '遅': S_OSO, '遅①': S_OSO, '遅②': S_OSO, '遅③': S_OSO,
-    '入': S_IRI, 'A夜勤': S_IRI, 'B夜勤': S_IRI,
-    '明': S_AKE,
+    '入': S_IRI, 'A夜': S_IRI, 'B夜': S_IRI, 'A夜勤': S_IRI, 'B夜勤': S_IRI,
+    '明': S_AKE, 'A明': S_AKE, 'B明': S_AKE,
     '休': S_YASU, '希望休': S_YASU,
     '有給': S_YUKU, '研修': S_KEN, 'フリー': S_FREE, 'OJT': S_OJT
 }
 
-shift_options = ["", "早①", "早②", "早③", "早", "Q", "遅①", "遅②", "遅③", "遅", "A夜勤", "B夜勤", "入", "明", "希望休", "休", "有給", "研修", "OJT", "フリー"]
+# プルダウンからは旧表記を完全削除
+shift_options = ["", "早①", "早②", "早③", "Q", "遅①", "遅②", "遅③", "A夜", "B夜", "A明", "B明", "希望休", "休", "有給", "研修", "OJT", "フリー"]
 limit_options = ["制限なし"] + [str(i) for i in range(0, 32)]
 prev_work_options = [str(i) for i in range(0, 6)]
 PREV_COL = "前月連勤"
@@ -65,7 +66,7 @@ DEFAULT_Q_DAYS = [1, 3, 6, 7, 8, 13, 14, 15, 17, 20, 22, 24, 27, 28, 29]
 def get_default_staff_df():
     data = []
     for name in DEFAULT_STAFF_NAMES:
-        data.append({"スタッフ名": name, "早の上限": "制限なし", "Qの上限": "制限なし", "遅の上限": "制限なし", "入の上限": "制限なし"})
+        data.append({"スタッフ名": name, "早の上限": "制限なし", "Qの上限": "制限なし", "遅の上限": "制限なし", "入の上限": "制限なし", "属性1": "", "属性2": ""})
     return pd.DataFrame(data)
 
 def get_default_ng_pairs_df():
@@ -83,8 +84,8 @@ def extract_day_num(col_name):
     return int(s) if s.isdigit() else None
 
 def apply_excel_dropdowns(writer, staffs_count, target_days):
-    # プルダウンの選択肢に新しい勤務区分を追加
-    shift_list = '"早①,早②,早③,早,Q,遅①,遅②,遅③,遅,A夜勤,B夜勤,入,明,希望休,休,有給,研修,OJT,フリー"'
+    # Excelのプルダウンも新表記のみに統一
+    shift_list = '"早①,早②,早③,Q,遅①,遅②,遅③,A夜,B夜,A明,B明,希望休,休,有給,研修,OJT,フリー"'
     
     if '希望休入力' in writer.sheets:
         ws_req = writer.sheets['希望休入力']
@@ -476,6 +477,8 @@ for s_idx, s_name in enumerate(staff_names):
         if base_df is not None:
             if s_name in base_df.index and str(d) in base_df.columns: orig_str = str(base_df.loc[s_name, str(d)]).strip()
             elif s_idx < len(base_df.index) and str(d) in base_df.columns: orig_str = str(base_df.iloc[s_idx][str(d)]).strip()
+        
+        # ユーザー入力を内部IDにマッピング（旧表記の読み込みもここで吸収される）
         if orig_str in str_to_shift:
             ORIGINAL_SHIFTS[(s_idx, d)] = str_to_shift[orig_str]
             ORIGINAL_STR_SHIFTS[(s_idx, d)] = orig_str
@@ -517,74 +520,123 @@ def get_ng_pairs():
                 pairs.append((idx1, idx2, f"{n1}さんと{n2}さんの同日「入」禁止"))
     return pairs
 
-# ★追加：最適化完了後の生シフトデータに対して、日ごとに重複しない番号をランダムに割り振る関数
+# ★追加：最適化完了後の生シフトデータ（早、遅、入、明）に対して、日ごとに重複しない番号をランダムに割り振る関数
 def assign_role_names(raw_table_data, req_df):
     warnings = []
+    
+    # 夜勤のリレー情報を保持する辞書 {スタッフID: 前日の夜勤アルファベット(A or B)}
+    prev_iri_letter = {}
+    
     for d_idx in range(TARGET_DAYS):
         d = d_idx + 1
         
         haya_staffs = []
         oso_staffs = []
         iri_staffs = []
+        ake_staffs = []
         
         for s_idx in range(staffs):
             if raw_table_data[s_idx][d_idx] == '早': haya_staffs.append(s_idx)
             elif raw_table_data[s_idx][d_idx] == '遅': oso_staffs.append(s_idx)
             elif raw_table_data[s_idx][d_idx] == '入': iri_staffs.append(s_idx)
+            elif raw_table_data[s_idx][d_idx] == '明': ake_staffs.append(s_idx)
             
         def assign_roles(staff_list, available_roles, base_role):
             assigned = {}
             avail = available_roles.copy()
-            
             unassigned = []
+            
             for s_idx in staff_list:
-                # ユーザーが画面で意図的に番号（早②など）を指定していた場合は、その番号を優先して割り当てる
                 req_val = str(req_df.loc[staff_names[s_idx], str(d)]).strip() if str(d) in req_df.columns else ""
                 if req_val in avail:
                     assigned[s_idx] = req_val
                     avail.remove(req_val)
                 else:
                     unassigned.append(s_idx)
-            
-            # 残りのスタッフに、余っている番号をランダムに割り当てる
+                    
             random.shuffle(unassigned)
             for s_idx in unassigned:
                 if avail:
                     assigned[s_idx] = avail.pop(0)
                 else:
-                    assigned[s_idx] = base_role # 制約緩和などで人数が溢れている場合は番号なしを割り当てる
+                    assigned[s_idx] = f"{base_role}?" # 人数オーバー時の安全策
             return assigned
 
+        # 早番の割り当て
         if len(haya_staffs) != 3:
-            warnings.append(f"{d}日の早番が{len(haya_staffs)}名です（通常3名）。一部に番号が付与されていません。")
+            warnings.append(f"{d}日の早番が{len(haya_staffs)}名です（通常3名）。一部の番号が重複または未付与になる可能性があります。")
         assigned_haya = assign_roles(haya_staffs, ['早①', '早②', '早③'], '早')
         for s, r in assigned_haya.items(): raw_table_data[s][d_idx] = r
 
+        # 遅番の割り当て
         if len(oso_staffs) != 3:
-            warnings.append(f"{d}日の遅番が{len(oso_staffs)}名です（通常3名）。一部に番号が付与されていません。")
+            warnings.append(f"{d}日の遅番が{len(oso_staffs)}名です（通常3名）。一部の番号が重複または未付与になる可能性があります。")
         assigned_oso = assign_roles(oso_staffs, ['遅①', '遅②', '遅③'], '遅')
         for s, r in assigned_oso.items(): raw_table_data[s][d_idx] = r
 
+        # 夜勤入りの割り当て
         if len(iri_staffs) != 2:
-            warnings.append(f"{d}日の夜勤入りが{len(iri_staffs)}名です（通常2名）。一部にアルファベットが付与されていません。")
-        assigned_iri = assign_roles(iri_staffs, ['A夜勤', 'B夜勤'], '入')
-        for s, r in assigned_iri.items(): raw_table_data[s][d_idx] = r
+            warnings.append(f"{d}日の夜勤入りが{len(iri_staffs)}名です（通常2名）。一部のアルファベットが重複または未付与になる可能性があります。")
+        assigned_iri = assign_roles(iri_staffs, ['A夜', 'B夜'], '入')
+        for s, r in assigned_iri.items():
+            raw_table_data[s][d_idx] = r
+            # 翌日の「明」のためにアルファベットを記録
+            prev_iri_letter[s] = 'A' if r == 'A夜' else 'B'
+
+        # 夜勤明けの割り当て（前日の入りのアルファベットを引き継ぐ）
+        current_ake_letters_available = ['A明', 'B明']
+        unassigned_ake = []
+        
+        for s in ake_staffs:
+            req_val = str(req_df.loc[staff_names[s], str(d)]).strip() if str(d) in req_df.columns else ""
+            if req_val in current_ake_letters_available:
+                # ユーザーが明示的にA明などを指定して固定されている場合
+                raw_table_data[s][d_idx] = req_val
+                current_ake_letters_available.remove(req_val)
+                # もし前日の入りのアルファベットと不一致なら警告を出す
+                expected_letter = prev_iri_letter.get(s, None)
+                actual_letter = req_val[0]
+                if expected_letter and expected_letter != actual_letter:
+                    warnings.append(f"{d}日の{staff_names[s]}さんの「明」指定（{req_val}）が前日の入り（{expected_letter}夜）と不一致です。指定を優先します。")
+            else:
+                if s in prev_iri_letter:
+                    letter = prev_iri_letter[s]
+                    assigned_ake_str = f"{letter}明"
+                    if assigned_ake_str in current_ake_letters_available:
+                        raw_table_data[s][d_idx] = assigned_ake_str
+                        current_ake_letters_available.remove(assigned_ake_str)
+                    else:
+                        # 他の手動固定と競合して取れない場合
+                        unassigned_ake.append(s)
+                else:
+                    # 月初1日で、前月末の入り情報が存在しない場合など
+                    unassigned_ake.append(s)
+                    
+        # 情報がない、または競合した明けの人に余りのアルファベットを割り当てる
+        random.shuffle(unassigned_ake)
+        for s in unassigned_ake:
+            if current_ake_letters_available:
+                raw_table_data[s][d_idx] = current_ake_letters_available.pop(0)
+            else:
+                raw_table_data[s][d_idx] = "明?"
 
     return warnings
 
 def format_result_df(raw_table_data):
     for s_idx, d_idx in KIBOU_YASU_CELLS:
         if 0 <= s_idx < len(raw_table_data) and 0 <= d_idx < TARGET_DAYS:
+            # 希望休は休の表記に戻さず「希望休」のままにする
             if raw_table_data[s_idx][d_idx] == '休': raw_table_data[s_idx][d_idx] = '希望休'
+            
     cols = [day_labels[i] for i in range(1, TARGET_DAYS + 1)]
     df = pd.DataFrame(raw_table_data, index=staff_names, columns=cols)
     
-    # ★修正：番号付きの勤務も、従来通りの集計枠にカウントされるように変更
-    df["【早】"] = df[cols].isin(["早", "早①", "早②", "早③"]).sum(axis=1)
+    # 新しい表記で集計を行う
+    df["【早】"] = df[cols].isin(["早①", "早②", "早③", "早", "早?"]).sum(axis=1)
     df["【Q】"] = (df[cols] == "Q").sum(axis=1)
-    df["【遅】"] = df[cols].isin(["遅", "遅①", "遅②", "遅③"]).sum(axis=1)
-    df["【入】"] = df[cols].isin(["入", "A夜勤", "B夜勤"]).sum(axis=1)
-    df["【明】"] = (df[cols] == "明").sum(axis=1)
+    df["【遅】"] = df[cols].isin(["遅①", "遅②", "遅③", "遅", "遅?"]).sum(axis=1)
+    df["【入】"] = df[cols].isin(["A夜", "B夜", "入", "入?"]).sum(axis=1)
+    df["【明】"] = df[cols].isin(["A明", "B明", "明", "明?"]).sum(axis=1)
     df["【休計】"] = df[cols].isin(["休", "希望休"]).sum(axis=1)
     df["【有給】"] = (df[cols] == "有給").sum(axis=1)
     if df[cols].isin(["研修"]).any().any(): df["【研修】"] = (df[cols] == "研修").sum(axis=1)
@@ -744,7 +796,6 @@ def run_normal_mode():
             
         raw_table = [[shift_str[next(t for t in range(10) if solver.Value(B[s, d, t]))] for d in range(TARGET_DAYS)] for s in range(staffs)]
         
-        # ★追加：計算結果の生データに対して、各日の番号・アルファベットを割り振る
         warnings = assign_role_names(raw_table, edited_req_df)
         res_df = format_result_df(raw_table)
         
@@ -760,8 +811,9 @@ def run_normal_mode():
                     for t in t_shifts:
                         if solver.Value(B[s, d, t]):
                             cnt += 1
-                            # 委員会対象者の表示は内部区分名（早、遅等）のまま出力します
-                            att_names.append(f"{staff_names[s]}({shift_str[t]})")
+                            # 報告表では実際に割り当てられた番号（早①等）で表示する
+                            actual_shift = raw_table[s][d]
+                            att_names.append(f"{staff_names[s]}({actual_shift})")
                 if cnt >= req_count:
                     met_day = d + 1
                     attendees = att_names
@@ -777,6 +829,7 @@ def run_normal_mode():
             else:
                 comm_records.append({"委員会名": c_name, "実施日": "⚠️ 条件を満たす日がありません", "参加対象者": "-"})
         comm_res_df = pd.DataFrame(comm_records)
+
         res_df = res_df.rename(columns=rename_dict)
 
         return res_df, pd.DataFrame(), comm_res_df, warnings
@@ -975,7 +1028,8 @@ def run_reschedule_mode():
                     for t in t_shifts:
                         if solver.Value(B[s, d, t]):
                             cnt += 1
-                            att_names.append(f"{staff_names[s]}({shift_str[t]})")
+                            actual_shift = raw_table[s][d]
+                            att_names.append(f"{staff_names[s]}({actual_shift})")
                 if cnt >= req_count:
                     met_day = d + 1
                     attendees = att_names
@@ -991,6 +1045,7 @@ def run_reschedule_mode():
             else:
                 comm_records.append({"委員会名": c_name, "実施日": "⚠️ 条件を満たす日がありません", "参加対象者": "-"})
         comm_res_df = pd.DataFrame(comm_records)
+
         result_df = result_df.rename(columns=rename_dict)
 
         return result_df, changes_df, comm_res_df, warnings
@@ -1128,7 +1183,8 @@ def run_debug_mode():
                     for t in t_shifts:
                         if solver.Value(B[s, d, t]):
                             cnt += 1
-                            att_names.append(f"{staff_names[s]}({shift_str[t]})")
+                            actual_shift = raw_table[s][d]
+                            att_names.append(f"{staff_names[s]}({actual_shift})")
                 if cnt >= req_count:
                     met_day = d + 1
                     attendees = att_names
