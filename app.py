@@ -687,7 +687,7 @@ def make_ojt_reports(data, result):
     result.ojt_history = pd.concat([data.ojt_history, pd.DataFrame(history, columns=HISTORY_COLUMNS)], ignore_index=True).drop_duplicates().reset_index(drop=True)
 
 
-def solve_once(data, max_consec=4, strict_rank=True, diagnostic=False, seconds=30.0, workers=8):
+def solve_once(data, max_consec=4, strict_rank=True, diagnostic=False, seconds=90.0, workers=8):
     model, variables, violations, committee_days = build_model(data, max_consec, strict_rank, diagnostic)
     solver = cp_model.CpSolver()
     solver.parameters.max_time_in_seconds = seconds
@@ -735,7 +735,7 @@ def solve_once(data, max_consec=4, strict_rank=True, diagnostic=False, seconds=3
     return result
 
 
-def run_schedule(data, seconds=30.0, workers=8, progress=None):
+def run_schedule(data, seconds=90.0, workers=8, progress=None):
     errors = validate_data(data)
     if errors:
         return SolveResult(diagnostics=errors, status="INPUT_ERROR")
